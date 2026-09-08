@@ -1,0 +1,35 @@
+# ---- data (large, and regenerable from COD) --------------------------------
+# ~2.8 GB of CIFs, the derived JSONL and the parse cache. All of it is rebuilt
+# by ingest/download.py + ingest/build_graph.py, and the manifest records the
+# exact COD revision it came from, so none of it belongs in git.
+data/
+
+# ---- TuringDB data directories --------------------------------------------
+turing-data*/
+*.turing/
+
+# ---- logs -----------------------------------------------------------------
+*.log
+
+# ---- python ---------------------------------------------------------------
+.venv/
+__pycache__/
+*.py[cod]
+.python-version
+uv.lock
+
+# ---- node -----------------------------------------------------------------
+visualizer/node_modules/
+visualizer/dist/
+visualizer/.vite/
+node_modules/
+
+# ---- editor / os ----------------------------------------------------------
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# ---- upstream visualizer bits that do not belong in this fork --------------
+visualizer/.github/
+visualizer/vercel.json
