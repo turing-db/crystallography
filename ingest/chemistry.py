@@ -44,7 +44,7 @@ from typing import Final
 #: temperatures COD entries are collected at, and because under-estimating the
 #: radius would silently MISS metal-ligand bonds, which fragments the component
 #: graph and is the more damaging error for this demo. Flagged in
-#: docs/QUESTIONS.md (Q-12) for review.
+#: worth a chemist's review.
 SPIN_STATE_NOTE: Final = "Mn/Fe/Co use Cordero high-spin radii"
 
 COVALENT_RADII: Final[dict[str, float]] = {

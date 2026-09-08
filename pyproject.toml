@@ -21,8 +21,8 @@ dependencies = [
     # COD publishes a public read-only MySQL mirror; pure-python driver keeps
     # the install free of a C build step.
     "pymysql>=1.1",
-    # TuringDB Python SDK. Pinned deliberately: see docs/QUESTIONS.md for the
-    # version/API differences between 1.32 and 1.35.
+    # TuringDB Python SDK. The server binary ships inside this wheel, so there
+    # is no separate install step.
     "turingdb",
     # Backend.
     "fastapi>=0.111",

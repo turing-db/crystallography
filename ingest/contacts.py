@@ -127,9 +127,10 @@ def detect_contacts(
     the criterion exists for, and correctly still covers an unrefined water in a
     structure whose organic component does have hydrogens.
 
-    pi-stacking is not produced here; see docs/QUESTIONS.md (Q-14) -- it needs
-    ring perception, and shipping a half-defined ring criterion would be worse
-    than shipping none.
+    pi-stacking is not produced here: it needs ring perception, and the spec's
+    centroid criterion alone admits badly offset stacks that most crystal
+    engineers would not call pi-stacking. Shipping a half-defined criterion
+    would be worse than shipping none. See the Known limits section of README.
 
     `time_budget_s` bounds the worst case. A handful of COD entries have a large
     asymmetric unit combined with many donors, and the candidate loop becomes

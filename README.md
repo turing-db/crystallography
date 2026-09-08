@@ -222,16 +222,14 @@ queries/         the analytical queries
   dimensionality_net.py  periodic-net dimensionality (0D/1D/2D/3D)
   versioned_stats.py     the same statistic across commits, plus the audit trail
 tests/           validation and dialect probes
-docs/
-  DIALECT.md         the verified TuringDB Cypher surface
-  QUESTIONS.md       open questions, including chemistry calls for review
 visualizer/      the front end (a trimmed TuringDB visualizer)
   src/components/viewer/crystal/   the studio: panel, chat, canvas, labels
 ```
 
-`docs/DIALECT.md` is worth reading before writing any Cypher against this
-engine — it records what the dialect actually accepts, tested against a running
-instance, and the rewrite each query needed.
+Each ingest module's docstring records why it is shaped the way it is, including
+the Cypher constructs this engine does and does not accept and the rewrite each
+query needed. `tests/probe_turingdb_syntax.py` re-derives that surface against a
+running instance if you want to check it yourself.
 
 ---
 

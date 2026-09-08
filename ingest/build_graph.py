@@ -5,7 +5,7 @@ shape: one JSON object per line, nodes and relationships interleaved, node ids
 and relationship ids each starting at 0 and incrementing with no gaps.
 
 Schema note -- three names differ from the obvious ones, and the reasons are
-enforced by the engine rather than stylistic (see docs/DIALECT.md):
+enforced by the engine rather than stylistic:
 
   * `Fragment.fragment_type`, not `type`  -- `type` is a reserved token.
   * `Publication.journal_volume`, not `volume` -- property types are GLOBAL in

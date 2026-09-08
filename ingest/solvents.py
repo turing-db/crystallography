@@ -2,8 +2,7 @@
 
 `role` on CONTAINS_COMPONENT is what stops coformer discovery from answering
 "water" for every query, so it is worth getting right and worth being explicit
-about. This is a chemical judgement call and is flagged in docs/QUESTIONS.md
-(Q-16) for review.
+about. This is a chemical judgement call and is worth a chemist's review.
 
 Matching is by molecular formula in Hill notation, which is safe here because
 solvents are small and their formulae are unambiguous at this size. InChIKey

@@ -489,7 +489,7 @@ def report() -> None:
                 print(f"         -> {r.sample[:180]}")
 
     print("\n" + "-" * 78)
-    print("FAILURES (these become QUESTIONS.md entries / query rewrites):")
+    print("FAILURES (each of these forces a query rewrite):")
     for r in RESULTS:
         if not r.ok:
             print(f"  - [{r.group}] {r.name}: {r.detail[:160]}")

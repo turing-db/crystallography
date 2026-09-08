@@ -24,8 +24,8 @@ coordinates; the contact network is *derived* every time anyone asks. We
 computed it once at ingest, with the generating symmetry operation on every
 edge, so the packing question becomes reachability rather than geometry.
 
-Dialect notes (see docs/DIALECT.md)
------------------------------------
+Dialect notes
+-------------
 TuringDB rejects an edge-type filter on a variable-length path
 (`Edge type filters are not supported with variable-length paths`), so this runs
 against a contact-only projection of the graph in which an untyped quantifier
