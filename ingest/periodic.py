@@ -90,7 +90,6 @@ class PeriodicNeighbours:
         # index means two genuinely distinct atoms are never merged, so the
         # tolerance only has to absorb refinement noise about the exact
         # special position.
-        occupied: set[tuple[int, int, int, int]] = set()
         inv_tol = 1.0 / SPECIAL_POSITION_TOLERANCE
 
         # bounding box of the asymmetric unit in fractional space, padded by the

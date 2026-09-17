@@ -1,0 +1,81 @@
+# Checks that need no database. The query gates and the validators need a live
+# TuringDB with the corpus loaded, which CI has no way to provide -- running
+# them here would mean either skipping silently or building 85k structures on
+# every push. They are listed in the README under Verification and are meant to
+# be run against a live instance.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - run: uv sync --extra dev
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: the CLI loads and its query library is well formed
+        run: |
+          uv run python - <<'PY'
+          import crystal
+          assert crystal.LIBRARY, "empty query library"
+          for name, (desc, cypher, tally) in crystal.LIBRARY.items():
+              assert desc and cypher, name
+              assert cypher.upper().startswith(("MATCH", "CALL")), name
+              if tally:
+                  for col in tally.split("+"):
+                      assert col in cypher, f"{name}: tally column {col} not projected"
+          print(f"{len(crystal.LIBRARY)} named queries well formed")
+          PY
+
+      - name: front-end destructure arity
+        run: |
+          uv run python - <<'PY'
+          import importlib.util, pathlib, sys
+          spec = importlib.util.spec_from_file_location(
+              "g", "tests/check_frontend_queries.py")
+          g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+          d = pathlib.Path("visualizer/src/components/viewer/crystal")
+          files = sorted(d.glob("*.ts")) + sorted(d.glob("*.tsx"))
+          bad = g.check_destructure_arity(files)
+          for b in bad:
+              print(b)
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: the front-end query extractor still finds the shipped queries
+        run: |
+          uv run python - <<'PY'
+          import importlib.util, pathlib, sys
+          spec = importlib.util.spec_from_file_location(
+              "g", "tests/check_frontend_queries.py")
+          g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+          d = pathlib.Path("visualizer/src/components/viewer/crystal")
+          files = sorted(d.glob("*.ts")) + sorted(d.glob("*.tsx"))
+          q = g.extract(files)
+          missing = [t for t in g.REQUIRED_TOKENS
+                     if not any(t in c for _, c in q)]
+          print(f"extracted {len(q)} queries")
+          if missing:
+              print("NOT COVERED: " + ", ".join(missing))
+          sys.exit(1 if missing or len(q) < 40 else 0)
+          PY
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: visualizer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npm run build

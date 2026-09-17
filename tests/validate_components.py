@@ -14,7 +14,10 @@ from collections import Counter
 
 import gemmi
 
-from ingest import chemistry as ch
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from ingest.structure import (
     build_atoms,
     component_instances,
@@ -44,6 +47,10 @@ def main() -> int:
     check_op_api()
 
     paths = sorted(glob.glob("data/cif/**/*.cif", recursive=True))
+    if not paths:
+        print("no CIFs under data/cif -- run `python -m ingest.download "
+              "--dataset slice` first", file=sys.stderr)
+        return 1
     sample = random.Random(7).sample(paths, min(n * 6, len(paths)))
 
     shown = 0

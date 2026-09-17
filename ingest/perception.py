@@ -90,7 +90,6 @@ def perceive_component(
 ) -> Perceived:
     """Build an RDKit molecule for one component and derive its identity."""
     from rdkit import Chem, RDLogger
-    from rdkit.Chem import rdDetermineBonds
     from rdkit.Geometry import Point3D
 
     RDLogger.DisableLog("rdApp.*")

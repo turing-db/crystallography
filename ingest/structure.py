@@ -19,6 +19,8 @@ InChI generation that could never succeed.
 
 from __future__ import annotations
 
+import math
+
 import hashlib
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -29,7 +31,7 @@ import numpy as np
 
 from . import chemistry as ch
 from .periodic import PeriodicNeighbours, asymmetric_positions
-from .symmetry import SymOp, resolve_symop, spacegroup_of
+from .symmetry import SymOp, spacegroup_of
 
 #: Assembling a molecule stops here. Anything larger is an extended framework
 #: (coordination polymer, MOF, hydrogen-bonded network in the covalent graph),
@@ -144,7 +146,7 @@ def _clean_float(value: float | None) -> float | None:
         f = float(value)
     except (TypeError, ValueError):
         return None
-    if f != f:  # NaN
+    if not math.isfinite(f):
         return None
     return f
 

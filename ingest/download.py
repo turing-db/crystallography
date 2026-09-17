@@ -26,7 +26,6 @@ import argparse
 import csv
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -37,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .cod_journals import JOURNALS, JOURNALS_BY_KEY, all_variants, journal_key_for
+from .cod_journals import JOURNALS, JOURNALS_BY_KEY, journal_key_for
 
 # --------------------------------------------------------------------------
 # constants

@@ -40,49 +40,86 @@ STARTS = ("MATCH ", "MATCH(", "CALL ", "LOAD ")
 
 #: Anything containing one of these is JavaScript that merely begins with a
 #: Cypher keyword -- a concatenation, a JSX block, an arrow function.
-NOT_CYPHER = ('")', "\")", "=>", "<div", "</", "${", "` +", "return {",
+#: NOTE: "${" is deliberately NOT here. Interpolations are resolved by SUBS
+#: below; rejecting them at this stage discards every non-trivial query and
+#: leaves the check silently covering only the literal ones.
+NOT_CYPHER = ('")', "\")", "=>", "<div", "</", "` +", "return {",
               "'<")   # "'<" is a doc placeholder like LOAD COMMIT '<hash>'
 
 #: Placeholders the UI substitutes at runtime. Replaced with something valid so
 #: the query shape can still be executed.
 SUBS = {
     r"\$\{PACKING_SEED_COD\}": "2229029",
-    r"\$\{DIMER_COUNT\}": "",
     r"\$\{cod\}": "2229029",
-    r"\$\{base\}": "",
     r"\$\{hm\}": "P -1",
     r"\$\{t\}": "carboxylic_acid",
     r"\$\{id\}": "0",
     r"\$\{proj\}": "n.cod_id",
     r"\$\{year\}": "2011",
     r"\$\{k\}": "2",
+    # DIMER_COUNT and base are query PREFIXES concatenated with a suffix at the
+    # call site; substituting their text is what makes those queries runnable.
+    r"\$\{DIMER_COUNT\}": (
+        "MATCH (f1:Fragment)<-[:HAS_FRAGMENT]-(c1:Component)"
+        "<-[:IN_COMPONENT]-(a1:Atom)-[h:CONTACT]->(a2:Atom)"
+        "-[:IN_COMPONENT]->(c2:Component)-[:HAS_FRAGMENT]->(f2:Fragment) "
+        "WHERE f1.fragment_type = 'carboxylic_acid' "
+        "AND f2.fragment_type = 'carboxylic_acid' "
+        "AND h.kind = 'hbond' AND h.h_inferred = false AND h.is_involution = "),
+    r"\$\{base\}": (
+        "MATCH (g1:SpaceGroup)<-[:IN_SPACE_GROUP]-(s1:Structure)"
+        "-[r1:CONTAINS_COMPONENT]->(c:Component)"
+        "<-[r2:CONTAINS_COMPONENT]-(s2:Structure)-[:IN_SPACE_GROUP]->(g2:SpaceGroup) "
+        "WHERE r1.role = 'principal' AND r2.role = 'principal' "
+        "AND c.is_solvent = false AND c.has_inchikey = true "),
 }
+
+
+#: The investigation queries: `cypher: `...`` fields. These are the queries
+#: that paint the canvas and the ones a schema change breaks first, and the
+#: field is well delimited, so they can be recovered exactly rather than
+#: guessed at.
+_CYPHER_FIELD = re.compile(r"cypher:\s*`([^`]*)`", re.S)
+
+#: Single-literal queries passed directly to a helper, e.g.
+#: `scalar(g, "MATCH ... RETURN count(n)")`. Multi-literal concatenations are
+#: NOT recovered -- see the coverage assertion below, which exists precisely so
+#: that gap is reported rather than hidden.
+_CALL_QUERY = re.compile(
+    r"(?:scalar|scalarAt|runCypher|queryAt|loadSubgraph|q)\(\s*"
+    r"(?:[A-Za-z_][\w.]*\s*,\s*)?"
+    r"(?:\"((?:[^\"\\]|\\.)*)\"|'((?:[^'\\]|\\.)*)'|`([^`]*)`)\s*\)",
+    re.S)
+
+#: Tokens that MUST appear somewhere in the extracted set. Each is a schema
+#: element the studio depends on and that has no other coverage: if a rebuild
+#: drops one, the panels render empty rather than failing, which is the exact
+#: class of bug this file exists to catch. An empty extraction therefore fails
+#: loudly instead of reporting success over nothing.
+REQUIRED_TOKENS = ("CONTACT", "IN_COMPONENT", "HAS_FRAGMENT", "net_dim",
+                   "is_involution", "Snapshot", "IN_SPACE_GROUP")
 
 
 def extract(paths: list[Path]) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for p in paths:
         text = p.read_text()
-        # backtick template literals and ordinary quoted strings
-        for m in re.finditer(r"`([^`]*)`|'((?:[^'\\]|\\.)*)'|\"((?:[^\"\\]|\\.)*)\"", text):
-            raw = m.group(1) or m.group(2) or m.group(3) or ""
-            raw = raw.replace("\\'", "'").replace('\\"', '"')
-            body = raw.strip()
+        cands: list[tuple[int, str]] = []
+        for m in _CYPHER_FIELD.finditer(text):
+            cands.append((m.start(), m.group(1)))
+        for m in _CALL_QUERY.finditer(text):
+            cands.append((m.start(), m.group(1) or m.group(2) or m.group(3) or ""))
+        for pos, raw in cands:
+            body = raw.replace("\\'", "'").replace('\\"', '"').strip()
             if not body.upper().startswith(STARTS):
                 continue
             if any(tok in body for tok in NOT_CYPHER):
                 continue
-            # A candidate ending in a comma or an operator is one half of a
-            # concatenated literal -- the other half is the next string in the
-            # source. Running the fragment alone is a PARSE_ERROR that says
-            # nothing about the app, so skip it rather than cry wolf.
-            if body.rstrip().endswith((",", "+", "(", "AND", "OR", "WHERE")):
-                continue
             for pat, rep in SUBS.items():
                 body = re.sub(pat, rep, body)
-            if "${" in body:          # an interpolation we do not know: skip
+            if "${" in body:
                 continue
-            line = text[: m.start()].count("\n") + 1
+            line = text[:pos].count("\n") + 1
             out.append((f"{p.name}:{line}", " ".join(body.split())))
     return out
 
@@ -252,6 +289,13 @@ def main(argv: list[str] | None = None) -> int:
             bad.append((where, cypher, err))
 
     print(f"{n} distinct Cypher strings from {len(files)} frontend files")
+    uncovered = [t for t in REQUIRED_TOKENS
+                 if not any(t in c for _, c in queries)]
+    if uncovered:
+        print("\nNOT COVERED by any extracted query: " + ", ".join(uncovered))
+        print("Those schema elements are used by the studio but no query "
+              "reaching them was recovered, so this run proves nothing about "
+              "them. Fix the extractor rather than trusting the result.")
     if a.negative_control:
         ctrl = [b for b in bad if b[0] == "NEGATIVE-CONTROL"]
         if not ctrl:
@@ -263,9 +307,14 @@ def main(argv: list[str] | None = None) -> int:
 
     for g, k in sorted(missing.items()):
         print(f"  NOTE: {k} queries skipped -- graph '{g}' is not loaded")
-    if not bad:
-        print("all shipped queries execute cleanly")
+    if not bad and not uncovered:
+        print(f"all {n} extracted queries execute cleanly, and every required "
+              f"schema element is covered")
         return 0
+    if not bad:
+        print(f"\nthe {n} extracted queries execute cleanly, but coverage is "
+              f"incomplete (above)")
+        return 1
     print(f"\n{len(bad)} FAILING:")
     for where, cypher, err in bad:
         print(f"\n  {where}\n    {cypher[:170]}\n    -> {err}")

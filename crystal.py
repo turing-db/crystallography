@@ -123,9 +123,9 @@ LIBRARY: dict[str, tuple[str, str, str | None]] = {
         None,
     ),
     "contacts": (
-        "The contact populations, counted by kind",
-        "MATCH ()-[r:CONTACT]->() RETURN r.kind",
-        "r.kind",
+        "The contact populations, counted by kind and whether H was located",
+        "MATCH ()-[r:CONTACT]->() RETURN r.kind, r.h_inferred",
+        "r.kind+r.h_inferred",
     ),
     "hbond-geometry": (
         "Mean H...A over located-hydrogen bonds only",
@@ -189,7 +189,7 @@ LIBRARY: dict[str, tuple[str, str, str | None]] = {
         None,
     ),
     "fragments": (
-        "How many distinct molecules carry each perceived functional group",
+        "Molecules carrying each perceived functional group",
         "MATCH (c:Component)-[:HAS_FRAGMENT]->(f:Fragment) "
         "RETURN f.fragment_type",
         "f.fragment_type",
@@ -284,10 +284,13 @@ def tally_rows(names: list[str], rows: list[list],
     """
     from collections import Counter
 
-    idx = names.index(column) if column in names else 0
-    counts = Counter("-" if r[idx] is None else r[idx] for r in rows)
+    wanted = column.split("+")
+    idx = [names.index(c) for c in wanted if c in names] or [0]
+    counts: Counter[tuple] = Counter(
+        tuple("-" if r[i] is None else r[i] for i in idx) for r in rows)
     ordered = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
-    return [column, "count"], [[k, v] for k, v in ordered]
+    return ([names[i] for i in idx] + ["count"],
+            [list(k) + [v] for k, v in ordered])
 
 
 def emit(names, rows, args) -> None:
@@ -421,9 +424,24 @@ def cmd_commits(args) -> int:
     return 0
 
 
+#: The graphs this project builds. A server may carry others -- scratch graphs,
+#: earlier builds -- and a new user has no way to tell which are the deliverable.
+PROJECT_GRAPHS = ("cod_slice_v2", "cod_contacts_v2", "cod_versioned", "cod_versions")
+
+
 def cmd_graphs(args) -> int:
     names, rows = query("LIST AVAILABLE GRAPHS", graph="default", host=args.host)
+    if not (args.json or args.csv) and names:
+        names = list(names) + ["project"]
+        rows = [list(r) + ["yes" if r[0] in PROJECT_GRAPHS else "-"]
+                for r in rows]
+        rows.sort(key=lambda r: (r[-1] != "yes", str(r[0])))
     emit(names, rows, args)
+    if not (args.json or args.csv):
+        missing = [g for g in PROJECT_GRAPHS
+                   if g not in {str(r[0]) for r in rows}]
+        if missing:
+            print(f"\nmissing: {', '.join(missing)} -- run ./run.sh --ingest")
     return 0
 
 

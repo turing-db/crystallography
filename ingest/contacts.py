@@ -30,7 +30,6 @@ import numpy as np
 from . import chemistry as ch
 from .periodic import PeriodicNeighbours
 from .structure import Atom, Bond, _op_for
-from .symmetry import SymOp
 
 #: Bounds the per-component molecule walk. A component larger than this is an
 #: extended framework, which structure.find_components already flags.

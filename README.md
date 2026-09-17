@@ -64,8 +64,15 @@ to be able to refuse the weaker evidence:
 | Halogen bond | 4,119 | C–X···A > 150°, X···A under ΣvdW |
 | `close_contact` — excluded from every H-bond statistic | 24,084 | implausible inferred donor |
 
-82.1% of structures are in a centrosymmetric space group. Every figure on this
-page is re-derived from the live graph by `python tests/corpus_facts.py`.
+82.1% of structures are in a centrosymmetric space group.
+
+Periodic-net dimensionality is scored for **40,315 structures (47.5%)** — the
+rest have no located-hydrogen strong hydrogen bond and carry `net_dim = -1`. Any
+dimensionality percentage quoted here is over that scored subset, not the whole
+corpus.
+
+Every figure on this page is re-derived from the live graph by
+`python tests/corpus_facts.py`.
 
 ---
 
@@ -118,9 +125,19 @@ place.
 - **Covalent bonds** — `d < r_cov(A) + r_cov(B) + 0.40 Å`, radii from Cordero
   et al., *Dalton Trans.* 2008, 2832. Sites below 0.5 occupancy are excluded.
 - **Hydrogen bonds** — H···A < 2.50 Å with D–H···A > 120°, donors and acceptors
-  from {N, O, F, S, Cl}. Where no hydrogen was refined, a heavy-atom D···A
-  < 3.50 Å fallback applies and the edge is flagged `h_inferred`; only N, O and
-  S are admitted as inferred donors.
+  from {N, O, F, S, Cl}. Chlorine appears as an acceptor almost entirely as
+  chloride: of 60 sampled Cl acceptor sites, none was covalently bonded to
+  carbon.
+- **Inferred hydrogen bonds** — where no hydrogen was refined, a heavy-atom
+  D···A < 3.50 Å fallback applies and the edge is flagged `h_inferred`. This is
+  a **distance-only criterion: there is no angular test**, and 3.50 Å is loose
+  for O···O against the ~3.2 Å usually used. Only N, O and S are admitted as
+  inferred donors. The fallback fires only when the donor's *whole molecule*
+  carries no hydrogen — the "this entry has no H positions" case — rather than
+  per atom, which is what stops a carbonyl oxygen being treated as a donor in a
+  structure that is otherwise fully refined. 42.8% of the hydrogen-bond layer is
+  inferred; treat it as a separate, weaker population and filter it out of any
+  geometry claim.
 - **Weak hydrogen bonds** — C–H···A with a *located* H, H···A ≤ 2.90 Å and
   C–H···A ≥ 120°, after Taylor & Kennard, *JACS* **104** (1982) 5063 and
   Steiner, *Angew. Chem. Int. Ed.* **41** (2002) 48. Stored as
@@ -158,6 +175,12 @@ has three bonds.
 
 ## Known limits
 
+- **There is no atom-level fragment membership.** `HAS_FRAGMENT` links a
+  molecule to a functional-group type; nothing records *which* atom belongs to
+  that group. The shipped motif queries therefore select "an oxygen of a
+  molecule containing a carboxylic acid", which in a polyfunctional molecule can
+  be an alcohol or a nitro oxygen instead. Spot-checking 60 dimer hits, 10 were
+  not carboxyl–carboxyl. Treat those queries as candidate generators.
 - **π-stacking is not implemented.** It needs ring perception, and a
   centroid-distance criterion with no slippage constraint admits badly offset
   pairs that most crystal engineers would not call stacking.
@@ -171,10 +194,11 @@ has three bonds.
   both alternates survive. `_atom_site_disorder_group` is not read.
 - **InChIKey perception reaches ~36% of components.** Metal complexes fail by
   construction — InChI has no well-defined representation for them.
-- **Halogen bonds are dominated by chlorine**, and an unactivated C–Cl is a very
-  weak σ-hole donor. The 150° floor is loose against the 155–165° convention,
-  and acceptors are restricted to {N, O, F, S, Cl}, so X···π and type-II X···X
-  are undetectable by construction.
+- **Halogen bonds are dominated by chlorine** (1,980 of 4,119 donors), and an
+  unactivated C–Cl is a very weak σ-hole donor. The 150° angle floor is loose
+  against the 155–165° convention — 458 edges, 11%, fall in that gap. Acceptors
+  are restricted to {N, O, F, S, Cl}, so X···π is undetectable; Cl···Cl **is**
+  detected and accounts for 1,184 edges.
 - **`pyridine_nitrogen` misses the diazines.** The SMARTS requires the other five
   ring atoms to be aromatic carbon, so pyrimidine, pyrazine, pyridazine and
   triazine acceptors are excluded. `carboxylic_acid` requires an explicit
@@ -193,14 +217,16 @@ has three bonds.
 ## Provenance
 
 CIFs come from the live rsync tree at `rsync://www.crystallography.net/cif/`;
-metadata from COD's public read-only MySQL mirror.
-`data/manifest/slice_manifest.json` records the release revision, the metadata
-SVN revision, the exact journal-name strings matched, the size cap applied, and
-the sorted COD ID list with a checksum.
-
-Files above 512 kB are skipped (95.0% of the slice kept); the excluded IDs are
-listed in `data/manifest/slice_skipped_ids.txt`. COD's `robots.txt` is
+metadata from COD's public read-only MySQL mirror. COD's `robots.txt` is
 `Disallow: /`, so nothing is scraped over HTTP.
+
+`--ingest` writes `data/manifest/slice_manifest.json` recording the release
+revision, the metadata SVN revision, the exact journal-name strings matched, the
+size cap applied, and the sorted COD ID list with a checksum; skipped IDs go to
+`slice_skipped_ids.txt`. Those are **build outputs, not repository contents** —
+`data/` is 2.8 GB and gitignored — so they describe your build, and two builds
+from different COD revisions will differ. Files above 512 kB are skipped, which
+keeps 95.0% of the slice.
 
 COD data is dedicated to the public domain under CC0. If you use COD in
 published work, cite Gražulis et al., *J. Appl. Cryst.* **42** (2009) 726 and

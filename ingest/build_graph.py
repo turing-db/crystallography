@@ -24,12 +24,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
+import math
 import signal
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -344,16 +343,21 @@ def build(
         uid_site = {a["uid"]: i for i, a in enumerate(res["atoms"])}
         sg_no = res["spacegroup_number"]
 
-        def _dim(kinds: frozenset[str]) -> int:
+        def _dim(kinds: frozenset[str], _res: dict[str, Any] = res,
+                 _sg: int = sg_no, _bonds: list = net_bonds,
+                 _sites: dict[str, int] = uid_site) -> int:
+            # The loop variables are bound as defaults rather than captured:
+            # the closure is called within the same iteration, but binding is
+            # correct by construction and keeps the intent explicit.
             edges = [
                 (c["a"], c["b"], c["symop"])
-                for c in res["contacts"]
+                for c in _res["contacts"]
                 if c["kind"] in kinds and not c["h_inferred"]
             ]
             if not edges:
                 return -1            # no qualifying contact; NOT a 0D claim
             try:
-                d = net_dimensionality(sg_no, net_bonds + edges, uid_site)[0]
+                d = net_dimensionality(_sg, _bonds + edges, _sites)[0]
             except Exception:  # noqa: BLE001
                 return -2            # declined (over the expansion ceiling)
             return d
@@ -526,7 +530,7 @@ def build(
                 })
                 if not _edge_exists(edges, cid, fid, "HAS_FRAGMENT"):
                     edge("HAS_FRAGMENT", cid, fid)
-                report["fragment_links"] += 1
+                    report["fragment_links"] += 1
 
         # ---- Atom -> Component ------------------------------------------
         # Without this edge there is no path from a CONTACT between two atoms to
@@ -623,7 +627,7 @@ def build(
         if not isinstance(props, dict):
             return obj
         for k, v in list(props.items()):
-            if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+            if isinstance(v, float) and not math.isfinite(v):
                 props[k] = None
         return obj
 
@@ -660,13 +664,27 @@ def build(
     return summary
 
 
+#: Edge types that must appear at most once between a given pair. Component,
+#: Fragment, Journal and Author nodes are all deduplicated corpus-wide, so the
+#: same pair is reached again every time another structure containing that
+#: molecule, group, journal or author is emitted.
+_SEEN_EDGES: set[tuple[str, int, int]] = set()
+
+
 def _edge_exists(edges: list[dict[str, Any]], src: int, tgt: int, label: str) -> bool:
-    # Cheap guard for the few edge types that are naturally deduplicated.
-    # Linear scan is fine because it is only consulted for Fragment/Journal.
-    s, t = str(src), str(tgt)
-    for e in reversed(edges[-400:]):
-        if e["label"] == label and e["start"]["id"] == s and e["end"]["id"] == t:
-            return True
+    """True if this (label, src, tgt) edge has already been emitted.
+
+    Exact, via a set. A bounded scan of recent edges is not sufficient: a
+    Component node is shared by every structure containing that molecule, and
+    those structures are scattered through the corpus, so the second visit is
+    usually thousands of edges later. Under-deduplicating here multiplies any
+    query that joins Fragment on both ends of a contact -- the pair count
+    becomes (matches on side 1 x matches on side 2) rather than one.
+    """
+    key = (label, src, tgt)
+    if key in _SEEN_EDGES:
+        return True
+    _SEEN_EDGES.add(key)
     return False
 
 
@@ -813,7 +831,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     rep_path.write_text(json.dumps(summary, indent=2) + "\n")
 
     c = summary["counts"]
-    print(f"\n=== ingest report ===")
+    print("\n=== ingest report ===")
     print(f"  structures      : {c.get('structures', 0):,}  "
           f"(skipped {c.get('skipped', 0):,})")
     print(f"  atoms           : {c.get('atoms', 0):,}")

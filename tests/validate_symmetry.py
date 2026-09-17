@@ -18,6 +18,10 @@ from collections import Counter
 
 import gemmi
 
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from ingest import chemistry as ch
 from ingest.symmetry import resolve_symop, spacegroup_of, verify_symop
 

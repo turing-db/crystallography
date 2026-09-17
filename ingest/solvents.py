@@ -33,7 +33,6 @@ SOLVENT_FORMULAE: Final[dict[str, str]] = {
     "C2 H6 O": "ethanol",
     "C2 O": "ethanol (H not located)",
     "C3 H8 O": "propanol / isopropanol",
-    "C3 O": "propanol (H not located)",
     "C2 H6 O S": "dimethyl sulfoxide",
     "C2 O S": "DMSO (H not located)",
     "C3 H7 N O": "dimethylformamide",
@@ -41,7 +40,9 @@ SOLVENT_FORMULAE: Final[dict[str, str]] = {
     "C2 H3 N": "acetonitrile",
     "C2 N": "acetonitrile (H not located)",
     "C3 H6 O": "acetone",
-    "C3 O": "acetone (H not located)",
+    # C3O with no located hydrogens is ambiguous between propan-1-ol,
+    # propan-2-ol and acetone; naming one of them would be a guess.
+    "C3 O": "propanol or acetone (H not located)",
     "C4 H8 O": "tetrahydrofuran",
     "C4 O": "THF (H not located)",
     "C4 H10 O": "diethyl ether",

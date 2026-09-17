@@ -589,7 +589,7 @@ RETURN a, labels(a), a.label, e, edgeType(e), b, labels(b), b.label`,
       const cod = PACKING_SEED_COD
       const [nH, nInf, nHal, mLen, mAng, nComp, nAtoms] = await Promise.all([
         scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.kind = 'hbond' RETURN count(r)`),
-        scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.h_inferred = true RETURN count(r)`),
+        scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.kind = 'hbond' AND r.h_inferred = true RETURN count(r)`),
         scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.kind = 'halogen' RETURN count(r)`),
         scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.h_inferred = false RETURN avg(r.length)`),
         scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.h_inferred = false RETURN avg(r.angle)`),
@@ -818,21 +818,21 @@ RETURN a, labels(a), a.tag, e, edgeType(e), b, labels(b), b.tag`,
     answer: async () => {
       const L = LEDGER_GRAPH
       const V = VERSIONED_GRAPH
-      const [nSnap, firstYear, lastYear, totalNow] = await Promise.all([
+      // This dialect implements only count() and avg() -- min, max and sum are
+      // all PLAN_ERROR -- so the ends of the range are read off the ordered
+      // chain rather than aggregated.
+      const [nSnap, totalNow] = await Promise.all([
         scalar(L, 'MATCH (s:Snapshot) RETURN count(s)'),
-        scalar(L, 'MATCH (s:Snapshot) RETURN min(s.year)').catch(() => 0),
-        scalar(L, 'MATCH (s:Snapshot) RETURN max(s.year)').catch(() => 0),
         scalar(V, 'MATCH (s:Structure) RETURN count(s)'),
       ])
-      // min/max do not exist in this dialect, so read the ends off the chain
       const ends = await runCypher(
         L,
         'MATCH (s:Snapshot) RETURN s.year, s.tag, s.structures_total ORDER BY s.year'
       )
       const years = (ends[0] ?? []).map((v) => Number(v))
       const totals = (ends[2] ?? []).map((v) => Number(v))
-      const y0 = years[0] ?? firstYear
-      const y1 = years[years.length - 1] ?? lastYear
+      const y0 = years[0] ?? 0
+      const y1 = years[years.length - 1] ?? 0
       const peakIdx = totals.reduce(
         (best, _v, i) =>
           i > 0 && totals[i] - totals[i - 1] > totals[best] - totals[best - 1] ? i : best,
@@ -1041,7 +1041,7 @@ RETURN a, labels(a), a.label, e, edgeType(e), b, labels(b), b.label`,
       const [strong, inferred, weak, halogen, structures, mwLen, mwAng] =
         await Promise.all([
           scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond' AND r.h_inferred = false RETURN count(r)"),
-          scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.h_inferred = true RETURN count(r)"),
+          scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond' AND r.h_inferred = true RETURN count(r)"),
           scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond_weak' RETURN count(r)"),
           scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'halogen' RETURN count(r)"),
           scalar(g, 'MATCH (s:Structure) RETURN count(s)'),
