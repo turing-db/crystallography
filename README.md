@@ -38,7 +38,7 @@ crystal at 2009 "MATCH (s:Structure) RETURN count(s)"   # as the corpus stood th
 
 Requires `uv`, Node 20+ and `rsync`. The TuringDB server binary ships inside the
 `turingdb` Python wheel, so there is nothing else to install. `--ingest` needs
-network access to `crystallography.net` and takes roughly 25 minutes.
+network access to `crystallography.net`.
 
 ---
 
