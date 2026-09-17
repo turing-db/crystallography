@@ -6,12 +6,11 @@ shell or from the browser.
 1. [Running it](#1-running-it)
 2. [The graph model](#2-the-graph-model)
 3. [Querying from the command line](#3-querying-from-the-command-line)
-4. [The Cypher dialect: what works and what does not](#4-the-cypher-dialect-what-works-and-what-does-not)
-5. [Worked questions](#5-worked-questions)
-6. [The browser studio](#6-the-browser-studio)
-7. [Time travel](#7-time-travel)
-8. [How the data gets in](#8-how-the-data-gets-in)
-9. [Writing fast queries](#9-writing-fast-queries)
+4. [Worked questions](#5-worked-questions)
+5. [The browser studio](#6-the-browser-studio)
+6. [Time travel](#7-time-travel)
+7. [How the data gets in](#8-how-the-data-gets-in)
+8. [Writing fast queries](#9-writing-fast-queries)
 
 ---
 
@@ -373,7 +372,7 @@ the first place, and still says nothing about the packing without a second pass.
 
 ---
 
-## 6. The browser studio
+## 5. The browser studio
 
 <http://localhost:8087>, then pick a crystallography graph.
 
@@ -410,7 +409,7 @@ atoms, and it would overwrite the subgraph the studio paints.
 
 ---
 
-## 7. Time travel
+## 6. Time travel
 
 The corpus is ingested chronologically, one commit per publication year: 26
 years, and 26 entries in the `cod_versions` ledger.
@@ -468,7 +467,7 @@ which makes the mapping itself queryable.
 
 ---
 
-## 8. How the data gets in
+## 7. How the data gets in
 
 ```
 COD rsync + MySQL  →  parse cache  →  JSONL  →  LOAD JSONL  →  cod_slice_v2
@@ -558,7 +557,7 @@ tiebreaker, not the main lever.
 
 ---
 
-## 9. Writing fast queries
+## 8. Writing fast queries
 
 **Write a multi-hop read as one connected chain, starting at the most selective
 label.** This is worth more than everything else combined.
