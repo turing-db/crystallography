@@ -127,6 +127,32 @@ HBOND_HEAVY_MAX: Final = 3.50               # angstrom
 #: Elements admitted as hydrogen-bond donor or acceptor heavy atoms.
 HBOND_ELEMENTS: Final[frozenset[str]] = frozenset({"N", "O", "F", "S", "Cl"})
 
+#: Weak hydrogen bond: C-H...A, the interaction Taylor & Kennard established is
+#: real and that Desiraju & Steiner made a structural tool. Admitting it matters
+#: here for a specific reason: with only strong N/O-H...O/N bonds the stored
+#: contact layer averages ~3.4 edges per structure and most packings do not
+#: percolate, which is why the periodic-net dimensionality reads 0D for 88% of
+#: the corpus. C-H...O is the cheapest correction -- same geometry, different
+#: donor set, no ring perception needed.
+#:
+#: Two rules the detector enforces, both deliberate:
+#:
+#: * These edges are written with kind='hbond_weak', never 'hbond'. Every query
+#:   that filters kind='hbond' therefore returns exactly what it returned
+#:   before. The project rule that the strong and inferred populations are never
+#:   silently mixed now extends to three populations.
+#: * There is NO h_inferred fallback for the weak class. A strong N...O at 3.5 A
+#:   with no located hydrogen is a defensible inference; a C...O at 3.5 A with no
+#:   located hydrogen is just two atoms near each other. Weak contacts are
+#:   emitted only where the hydrogen was actually refined.
+#:
+#: 2.90 A is the conventional H...A ceiling for a structurally meaningful
+#: C-H...O (Steiner 2002 Table 2 puts the bulk of the population inside it); the
+#: 120 deg angle floor is the same one used for the strong class.
+WEAK_HBOND_DONORS: Final[frozenset[str]] = frozenset({"C"})
+WEAK_HBOND_MAX_H_ACCEPTOR: Final = 2.90     # angstrom
+WEAK_HBOND_MIN_ANGLE: Final = 120.0         # degrees
+
 #: Halogen bond: C-X...A where X is Cl, Br or I. The X...A distance must be
 #: below the sum of van der Waals radii, and the C-X...A angle above 150 deg
 #: (the sigma-hole is directed along the C-X axis).
@@ -199,6 +225,10 @@ def is_halogen_donor(symbol: str) -> bool:
     return normalise_element(symbol) in HALOGEN_DONORS
 
 
+def is_weak_hbond_donor(symbol: str) -> bool:
+    return normalise_element(symbol) in WEAK_HBOND_DONORS
+
+
 #: Reported in the ingest report so the exact conventions travel with the data.
 CRITERIA_PROVENANCE: Final[dict[str, str]] = {
     "covalent_radii": (
@@ -218,6 +248,15 @@ CRITERIA_PROVENANCE: Final[dict[str, str]] = {
     ),
     "hbond_without_h": (
         f"D...A < {HBOND_HEAVY_MAX} A, flagged h_inferred=true"
+    ),
+    "hbond_weak": (
+        f"C-H...A with a LOCATED H; H...A < {WEAK_HBOND_MAX_H_ACCEPTOR} A and "
+        f"C-H...A > {WEAK_HBOND_MIN_ANGLE} deg, A in {sorted(HBOND_ELEMENTS)}; "
+        "stored as kind='hbond_weak', never merged with the strong population, "
+        "and never inferred without a hydrogen. "
+        "Taylor & Kennard, J. Am. Chem. Soc., 1982, 104, 5063 "
+        "(doi:10.1021/ja00383a012); Desiraju & Steiner, The Weak Hydrogen Bond, "
+        "OUP 1999; Steiner, Angew. Chem. Int. Ed., 2002, 41, 48"
     ),
     "halogen_bond": (
         f"X in {sorted(HALOGEN_DONORS)}; X...A < sum of vdW radii and "

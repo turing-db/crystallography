@@ -18,11 +18,12 @@ in a DIFFERENT property so it is never mistaken for an InChIKey.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import gemmi
 
 from .fragments import FragmentPattern, compiled_patterns
+from .rdkit_guard import BondOrderPerceiver
 from .structure import Atom, Bond, hill_formula
 
 #: Above this atom count we do not attempt bond-order perception. RDKit's
@@ -32,6 +33,23 @@ from .structure import Atom, Bond, hill_formula
 MAX_PERCEPTION_ATOMS = 60
 
 _PATTERNS: list[tuple[FragmentPattern, object]] | None = None
+
+#: One killable RDKit worker per ingest process, created on first use.
+_PERCEIVER: "BondOrderPerceiver | None" = None
+
+
+def _perceiver() -> "BondOrderPerceiver":
+    global _PERCEIVER
+    if _PERCEIVER is None:
+        from .rdkit_guard import BondOrderPerceiver
+
+        _PERCEIVER = BondOrderPerceiver()
+    return _PERCEIVER
+
+
+def perception_timeouts() -> int:
+    """How many components were abandoned to a killed worker."""
+    return _PERCEIVER.timeouts if _PERCEIVER is not None else 0
 
 
 def _has_metal(atoms: list[Atom], instances: list[tuple[int, gemmi.Op]]) -> bool:
@@ -60,6 +78,9 @@ class Perceived:
     n_heavy: int
     charge: int | None
     fragments: list[str]
+    #: fragment type -> the SITE INDICES it matched, so a query can ask which
+    #: atom belongs to the group rather than only which molecule contains one
+    fragment_sites: dict[str, list[int]] = field(default_factory=dict)
     error: str = ""
 
 
@@ -72,7 +93,6 @@ def perceive_component(
 ) -> Perceived:
     """Build an RDKit molecule for one component and derive its identity."""
     from rdkit import Chem, RDLogger
-    from rdkit.Chem import rdDetermineBonds
     from rdkit.Geometry import Point3D
 
     RDLogger.DisableLog("rdApp.*")
@@ -146,17 +166,33 @@ def perceive_component(
 
     try:
         m = mol.GetMol()
-        # infer bond orders and formal charges from the 3D geometry; this is the
-        # step that fails on metal complexes
-        rdDetermineBonds.DetermineBondOrders(m, charge=0, embedChiral=False)
-        Chem.SanitizeMol(m)
-        inchi = Chem.MolToInchi(m)
-        if not inchi:
-            raise ValueError("empty InChI")
-        key = Chem.InchiToInchiKey(inchi)
-        charge = Chem.GetFormalCharge(m)
-        frags = _match_fragments(m)
-        return Perceived(key, fallback, formula, n_atoms, n_heavy, charge, frags)
+        # Infer bond orders and formal charges from the 3D geometry. This is the
+        # step that fails on metal complexes -- and, on a small number of
+        # ordinary organics, the step that NEVER RETURNS. It is a C++ call, so
+        # the ingest's own SIGALRM cannot interrupt it; it runs in a child
+        # process the parent can kill instead. See ingest/rdkit_guard.py.
+        status, payload = _perceiver().perceive(Chem.MolToMolBlock(m, kekulize=False))
+        if status != "ok":
+            raise ValueError(str(payload))
+        key = payload["inchikey"]
+        charge = payload["charge"]
+        # Fragment matching must run on the PERCEIVED molecule, not on `m`.
+        # Bond-order perception happens in the child process, so `m` still
+        # carries none and every bond-order-sensitive SMARTS would fail to
+        # match -- silently, since an unmatched pattern is indistinguishable
+        # from an absent group. The perceived structure comes back as SMILES:
+        # atom order is irrelevant to a SMARTS census, connectivity and bond
+        # order are not.
+        # The child matched the SMARTS on the perceived molecule, so these
+        # indices are in the caller's own atom order and map straight back to
+        # crystallographic sites through `instances`.
+        frags = payload.get("fragments") or []
+        frag_sites = {
+            name: sorted({instances[i][0] for i in idxs if i < len(instances)})
+            for name, idxs in (payload.get("fragment_atoms") or {}).items()
+        }
+        return Perceived(key, fallback, formula, n_atoms, n_heavy, charge, frags,
+                         fragment_sites=frag_sites)
     except Exception as exc:  # noqa: BLE001
         # Still try fragment matching on the unsanitised connectivity: many
         # SMARTS here are purely topological and match without bond orders.

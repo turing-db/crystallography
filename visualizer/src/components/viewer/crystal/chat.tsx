@@ -11,16 +11,20 @@
 import { type FC, useCallback, useEffect, useRef, useState } from 'react'
 import { Icon } from '@blueprintjs/core'
 import { useAppStore, useVisStore } from '@/stores'
+import { isCypherQuery } from '@/utils/is-cypher'
 import { useTuringContext } from '@turingcanvas'
 import {
   CRYSTAL_GRAPHS,
   INVESTIGATIONS,
+  SHELVES,
   type Investigation,
   type Snapshot,
   VERSIONED_GRAPH,
   loadLedger,
   loadSubgraph,
   routeQuestion,
+  runRawCypher,
+  type RawResult,
 } from './model'
 import { paintSubgraph } from './canvas'
 
@@ -38,6 +42,8 @@ interface Turn {
   shown: number // words revealed so far, across the whole answer
   /** set when the investigation can be replayed across commits */
   inv?: Investigation
+  /** set when the user typed Cypher instead of picking an investigation */
+  raw?: RawResult
 }
 
 const GREETING = 'Good afternoon, what would you like to investigate'
@@ -136,6 +142,55 @@ export const CrystalChat: FC = () => {
     [graphName, turing]
   )
 
+  /**
+   * Execute Cypher the user typed. Goes through this studio's own painter
+   * rather than the stock toolbar's pipeline, which is disabled on these
+   * graphs because it would fetch all 4.7M atoms and overwrite the canvas.
+   */
+  const runRaw = useCallback(
+    async (query: string) => {
+      if (!graphName) return
+      if (timerRef.current) window.clearInterval(timerRef.current)
+      setErr('')
+      setShowCypher(true)
+      setPhase('querying')
+      setMetrics([])
+      setActiveCommit(null)
+      setTurn({
+        question: 'Your query',
+        cypher: query,
+        nodes: 0,
+        edges: 0,
+        ms: 0,
+        paragraphs: [],
+        shown: 0,
+      })
+      try {
+        const res = await runRawCypher(graphName, query)
+        if (res.kind === 'graph' && res.sub) {
+          setPhase('painting')
+          paintSubgraph(turing, res.sub)
+        }
+        setTurn((t) =>
+          t
+            ? {
+                ...t,
+                nodes: res.sub?.nodes.length ?? 0,
+                edges: res.sub?.edges.length ?? 0,
+                ms: res.ms,
+                raw: res,
+              }
+            : t
+        )
+        setPhase('done')
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e))
+        setPhase('idle')
+      }
+    },
+    [graphName, turing]
+  )
+
   /** Re-run the current investigation against one commit and repaint. */
   const replayAt = useCallback(
     async (snap: Snapshot | null) => {
@@ -156,13 +211,27 @@ export const CrystalChat: FC = () => {
           t ? { ...t, nodes: sub.nodes.length, edges: sub.edges.length } : t
         )
         setMetrics(await inv.timeline.metrics(snap ? snap.commit : ''))
+
+        // The prose has to move with the chips, or the paragraph describes
+        // HEAD while the chips describe the selected commit.
+        if (snap && inv.timeline.answerAt) {
+          const paras = await inv.timeline.answerAt(snap.commit, snap.tag)
+          const words = paras.reduce((n, x) => n + x.split(' ').length, 0)
+          setTurn((t) => (t ? { ...t, paragraphs: paras, shown: words } : t))
+        } else if (!snap) {
+          // back to HEAD: restore the investigation's own narrative
+          const target = inv.graph ?? graphName ?? ''
+          const paras = await inv.answer(target, sub)
+          const words = paras.reduce((n, x) => n + x.split(' ').length, 0)
+          setTurn((t) => (t ? { ...t, paragraphs: paras, shown: words } : t))
+        }
       } catch (e) {
         setErr(e instanceof Error ? e.message : String(e))
       } finally {
         setTlBusy(false)
       }
     },
-    [turn?.inv, turn?.cypher, turing]
+    [turn?.inv, turn?.cypher, turing, graphName]
   )
 
   useEffect(() => {
@@ -175,7 +244,11 @@ export const CrystalChat: FC = () => {
     const q = input.trim()
     if (!q) return
     setInput('')
-    run(routeQuestion(q), q)
+    // Anything starting MATCH / CALL / RETURN / ... is meant as Cypher; the
+    // rest is routed to the nearest investigation by word overlap. Same
+    // detection the stock toolbar uses, so the two behave consistently.
+    if (isCypherQuery(q)) runRaw(q)
+    else run(routeQuestion(q), q)
   }
 
   // reveal the answer progressively across paragraphs
@@ -285,31 +358,78 @@ export const CrystalChat: FC = () => {
                     marginBottom: 9,
                   }}
                 >
-                  Suggested
+                  Query library
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                  {INVESTIGATIONS.map((inv) => (
-                    <button
-                      key={inv.id}
-                      type="button"
-                      onClick={() => run(inv, inv.prompt)}
-                      style={{
-                        textAlign: 'left',
-                        background: '#1f232b',
-                        border: '1px solid #2b303a',
-                        borderRadius: 10,
-                        padding: '10px 12px',
-                        color: '#d6dce8',
-                        fontFamily: PLEX,
-                        fontSize: 13,
-                        lineHeight: 1.45,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {inv.prompt}
-                    </button>
-                  ))}
-                </div>
+                {/* Grouped rather than one flat list: a CCDC room splits into
+                    crystallographers, solid-form/design people and the database
+                    team, and each shelf is aimed at one of them. Every entry
+                    carries a one-line statement of what it DEMONSTRATES, since
+                    the prompt alone does not say why the question is hard. */}
+                {SHELVES.map((shelf) => {
+                  const items = INVESTIGATIONS.filter((i) => i.shelf === shelf.id)
+                  if (!items.length) return null
+                  return (
+                    <div key={shelf.id} style={{ marginBottom: 16 }}>
+                      <div
+                        style={{
+                          fontFamily: PLEX,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          color: '#aab3c4',
+                          marginBottom: 2,
+                        }}
+                      >
+                        {shelf.title}
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: PLEX,
+                          fontSize: 11,
+                          color: '#6f7787',
+                          lineHeight: 1.4,
+                          marginBottom: 8,
+                        }}
+                      >
+                        {shelf.note}
+                      </div>
+                      <div
+                        style={{ display: 'flex', flexDirection: 'column', gap: 7 }}
+                      >
+                        {items.map((inv) => (
+                          <button
+                            key={inv.id}
+                            type="button"
+                            onClick={() => run(inv, inv.prompt)}
+                            style={{
+                              textAlign: 'left',
+                              background: '#1f232b',
+                              border: '1px solid #2b303a',
+                              borderRadius: 10,
+                              padding: '10px 12px',
+                              color: '#d6dce8',
+                              fontFamily: PLEX,
+                              fontSize: 13,
+                              lineHeight: 1.45,
+                              cursor: 'pointer',
+                            }}
+                          >
+                            <div>{inv.prompt}</div>
+                            <div
+                              style={{
+                                fontSize: 11,
+                                color: '#7f8799',
+                                lineHeight: 1.4,
+                                marginTop: 4,
+                              }}
+                            >
+                              {inv.blurb}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                })}
               </>
             )}
 
@@ -384,6 +504,115 @@ export const CrystalChat: FC = () => {
                   >
                     {turn.cypher}
                   </pre>
+                )}
+
+                {/* Put the query in the box so it can be edited and re-run.
+                    Reading the Cypher is worth something; changing one
+                    predicate and watching the canvas move is worth much more
+                    to an audience that writes queries for a living. */}
+                {showCypher && (
+                  <button
+                    type="button"
+                    onClick={() => setInput(turn.cypher)}
+                    style={{
+                      background: 'transparent',
+                      border: '1px solid #2b303a',
+                      borderRadius: 7,
+                      color: '#8fa5c4',
+                      fontFamily: PLEX,
+                      fontSize: 11.5,
+                      padding: '5px 10px',
+                      marginBottom: 12,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    edit &amp; run this query
+                  </button>
+                )}
+
+                {turn.raw?.kind === 'table' && (
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      overflowX: 'auto',
+                      border: '1px solid #23272f',
+                      borderRadius: 8,
+                    }}
+                  >
+                    <table
+                      style={{
+                        borderCollapse: 'collapse',
+                        width: '100%',
+                        fontFamily: "'IBM Plex Mono', ui-monospace, monospace",
+                        fontSize: 11,
+                      }}
+                    >
+                      <thead>
+                        <tr>
+                          {turn.raw.columns?.map((c) => (
+                            <th
+                              key={c}
+                              style={{
+                                textAlign: 'left',
+                                padding: '7px 10px',
+                                borderBottom: '1px solid #2b303a',
+                                color: '#7d8494',
+                                fontWeight: 400,
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {c}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {turn.raw.rows?.map((r, i) => (
+                          <tr key={i}>
+                            {r.map((v, j) => (
+                              <td
+                                key={j}
+                                style={{
+                                  padding: '6px 10px',
+                                  borderBottom: '1px solid #1d2128',
+                                  color: '#cdd4e0',
+                                  whiteSpace: 'nowrap',
+                                  fontVariantNumeric: 'tabular-nums',
+                                }}
+                              >
+                                {v}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {turn.raw.truncated && (
+                      <div
+                        style={{
+                          padding: '7px 10px',
+                          fontFamily: PLEX,
+                          fontSize: 11,
+                          color: '#6f7787',
+                        }}
+                      >
+                        first 40 rows shown
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {turn.raw?.kind === 'graph' && turn.nodes === 0 && (
+                  <div
+                    style={{
+                      marginBottom: 12,
+                      fontFamily: PLEX,
+                      fontSize: 12.5,
+                      color: '#7d8494',
+                    }}
+                  >
+                    The query ran and returned no rows.
+                  </div>
                 )}
 
                 {busy && (
@@ -632,7 +861,7 @@ export const CrystalChat: FC = () => {
               onKeyDown={(e) => {
                 if (e.key === 'Enter') submit()
               }}
-              placeholder="Ask about the corpus…"
+              placeholder="Ask a question, or type Cypher…"
               style={{
                 flex: 1,
                 background: '#12151a',

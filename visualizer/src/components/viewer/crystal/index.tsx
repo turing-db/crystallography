@@ -223,8 +223,18 @@ export const CrystalPanel: FC = () => {
               lineHeight: 1.6,
             }}
           >
+            {/* Three populations, shown as three, because a blended contact
+                count is the number that gets challenged first. */}
             <div>
-              <span style={{ color: '#cdd4e0' }}>{n(overview.hbonds)}</span> hydrogen bonds,{' '}
+              <span style={{ color: '#cdd4e0' }}>
+                {n(overview.hbonds - overview.hbondsInferred)}
+              </span>{' '}
+              strong H-bonds (H located),{' '}
+              <span style={{ color: '#cdd4e0' }}>{n(overview.hbondsInferred)}</span>{' '}
+              inferred
+            </div>
+            <div>
+              <span style={{ color: '#cdd4e0' }}>{n(overview.weak)}</span> weak C–H···A,{' '}
               <span style={{ color: '#cdd4e0' }}>{n(overview.halogen)}</span> halogen bonds
             </div>
             <div>
@@ -235,12 +245,19 @@ export const CrystalPanel: FC = () => {
               at{' '}
               <span style={{ color: '#cdd4e0', fontVariantNumeric: 'tabular-nums' }}>
                 {overview.meanAngle.toFixed(1)}°
+              </span>{' '}
+              <span style={{ color: '#6f7787' }}>
+                (strong, located-H population only)
               </span>
             </div>
             <div style={{ marginTop: 5, color: '#6f7787', fontSize: 11 }}>
-              {n(overview.hbondsInferred)} hydrogen bonds are h_inferred — no refined H
-              position, so a heavy-atom cutoff was used. Kept flagged, never mixed in
-              silently.
+              {overview.hbonds
+                ? ((100 * overview.hbondsInferred) / overview.hbonds).toFixed(0)
+                : '0'}
+              % of the hydrogen-bond layer is h_inferred — no refined H position, so a
+              heavy-atom D···A cutoff was used. Only N, O and S are admitted as inferred
+              donors; {n(overview.closeContact)} contacts with an implausible donor are
+              stored as close_contact and excluded from every H-bond statistic.
             </div>
           </div>
         )}

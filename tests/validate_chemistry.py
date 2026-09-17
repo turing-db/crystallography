@@ -18,6 +18,10 @@ from collections import Counter, defaultdict
 
 import gemmi
 
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from ingest import chemistry as ch
 from ingest.structure import build_atoms, detect_bonds, find_components, read_structure
 
@@ -60,6 +64,10 @@ EXPECTED: dict[str, set[int]] = {
 def main() -> int:
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 300
     paths = sorted(glob.glob("data/cif/**/*.cif", recursive=True))
+    if not paths:
+        print("no CIFs under data/cif -- run `python -m ingest.download "
+              "--dataset slice` first", file=sys.stderr)
+        return 1
     sample = random.Random(11).sample(paths, min(n, len(paths)))
 
     valence: dict[str, Counter[int]] = defaultdict(Counter)
@@ -121,6 +129,14 @@ def main() -> int:
           f"({100 * isolated_heavy / max(1, total_heavy):.2f}%)  "
           f"[excludes halide counter-ions]")
     print("\nvalence in PURELY ORGANIC environments (no metal neighbour):")
+    # A validator that analysed nothing must not report PASS. Without this,
+    # every element is skipped on an empty corpus, `ok` is never cleared, and
+    # the script exits 0 having checked zero structures -- which reads exactly
+    # like a clean run.
+    if not any(valence.get(el) for el in EXPECTED):
+        print("  no atoms analysed -- run `python -m ingest.download --dataset slice` "
+              "first", file=sys.stderr)
+        return 1
     ok = True
     for el in ("H", "C", "N", "O", "F", "S", "Cl", "Br", "I"):
         counts = valence.get(el)

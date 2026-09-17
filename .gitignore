@@ -33,3 +33,9 @@ node_modules/
 # ---- upstream visualizer bits that do not belong in this fork --------------
 visualizer/.github/
 visualizer/vercel.json
+
+# ---- internal working notes ------------------------------------------------
+# docs/DIALECT.md, docs/QUESTIONS.md and docs/PLAN_V2.md catalogue engine gaps
+# and open chemistry judgement calls. Useful internally, wrong signal in a
+# shared repo (see 059b8a9). Held on the build box instead.
+docs/

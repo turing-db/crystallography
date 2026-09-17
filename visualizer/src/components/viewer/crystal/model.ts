@@ -191,6 +191,121 @@ export async function loadSubgraph(
   return { nodes: [...nodes.values()], edges: [...edges.values()] }
 }
 
+/**
+ * Run a Cypher string the user typed, rather than one of the canned
+ * investigations.
+ *
+ * The stock visualizer toolbar is deliberately hidden on the crystallography
+ * graphs (see pages/viewer.tsx): its pipeline fetches EVERY node and edge in
+ * the graph, which is hopeless at 4.7M atoms, and its next sync would wipe the
+ * subgraph this studio paints by hand. That is a good reason to hide THAT
+ * toolbar and a bad reason to have no Cypher box at all -- being able to read
+ * and edit the query is most of what makes the demo credible to an audience
+ * that writes queries for a living.
+ *
+ * So raw Cypher goes through the studio's own painter instead. Two shapes come
+ * back:
+ *
+ *  - a query projecting the 8-column subgraph shape
+ *    (`a, labels(a), <name>, e, edgeType(e), b, labels(b), <name>`) paints the
+ *    canvas, exactly as an investigation does;
+ *  - anything else -- a count, an average, a flat projection -- comes back as
+ *    columns to tabulate, because refusing to show a scalar would make the box
+ *    useless for precisely the checks someone wants to run live.
+ */
+export interface RawResult {
+  kind: 'graph' | 'table'
+  sub?: Subgraph
+  columns?: string[]
+  rows?: string[][]
+  truncated?: boolean
+  ms: number
+}
+
+/** Rows to show before truncating a tabular result. */
+const RAW_ROW_LIMIT = 40
+
+export async function runRawCypher(
+  graph: string,
+  query: string
+): Promise<RawResult> {
+  const t0 = performance.now()
+  const res = await fetch(`/api/query?graph=${encodeURIComponent(graph)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: query,
+  })
+  const json = await res.json()
+  // Failures arrive as HTTP 200 with a non-null top-level `error`. Surface the
+  // engine's own wording -- PARSE_ERROR vs ANALYZE_ERROR vs PLAN_ERROR means
+  // something quite specific here, and paraphrasing it would hide that.
+  if (json.error) {
+    throw new Error(
+      `${json.error}${json.error_details ? `: ${json.error_details}` : ''}`
+    )
+  }
+  const ms = performance.now() - t0
+  const names: string[] = json.header?.column_names ?? []
+  const cols = columns(json.data as unknown[][])
+
+  const looksLikeSubgraph =
+    names.length === 8 &&
+    /^labels\(/i.test(names[1] ?? '') &&
+    /^(edgeType|type)\(/i.test(names[4] ?? '') &&
+    /^labels\(/i.test(names[6] ?? '')
+
+  if (looksLikeSubgraph) {
+    const nodes = new Map<number, GNode>()
+    const edges = new Map<number, GEdge>()
+    const n = cols[0]?.length ?? 0
+    for (let i = 0; i < n; i++) {
+      const aId = num(cols[0]?.[i])
+      const bId = num(cols[5]?.[i])
+      const eId = num(cols[3]?.[i])
+      if (!nodes.has(aId))
+        nodes.set(aId, {
+          id: aId,
+          label: str(cols[1]?.[i]),
+          name: str(cols[2]?.[i]) || str(cols[1]?.[i]),
+        })
+      if (!nodes.has(bId))
+        nodes.set(bId, {
+          id: bId,
+          label: str(cols[6]?.[i]),
+          name: str(cols[7]?.[i]) || str(cols[6]?.[i]),
+        })
+      if (!edges.has(eId))
+        edges.set(eId, { id: eId, src: aId, tgt: bId, type: str(cols[4]?.[i]) })
+    }
+    return {
+      kind: 'graph',
+      sub: { nodes: [...nodes.values()], edges: [...edges.values()] },
+      ms,
+    }
+  }
+
+  const rowCount = cols[0]?.length ?? 0
+  const shown = Math.min(rowCount, RAW_ROW_LIMIT)
+  const rows: string[][] = []
+  for (let i = 0; i < shown; i++) {
+    rows.push(names.map((_, c) => {
+      const v = cols[c]?.[i]
+      if (v === null || v === undefined) return '--'
+      if (typeof v === 'number')
+        return Number.isInteger(v) ? v.toLocaleString() : v.toFixed(4)
+      if (typeof v === 'boolean') return v ? 'true' : 'false'
+      return String(v)
+    }))
+  }
+  return {
+    kind: 'table',
+    columns: names,
+    rows,
+    truncated: rowCount > shown,
+    ms,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // the commit ledger
 // ---------------------------------------------------------------------------
@@ -247,6 +362,10 @@ export interface Overview {
   polymeric: number
   meanHA: number
   meanAngle: number
+  /** weak C-H...A contacts: a separate population, never merged with hbond */
+  weak: number
+  /** inferred contacts with an implausible donor, excluded from H-bond stats */
+  closeContact: number
 }
 
 export async function loadOverview(graph: string): Promise<Overview> {
@@ -254,25 +373,34 @@ export async function loadOverview(graph: string): Promise<Overview> {
   const [
     structures, atoms, components, contacts, hbonds, hbondsInferred, halogen,
     bonds, fragments, spaceGroups, withInchikey, polymeric, meanHA, meanAngle,
+    weak, closeContact,
   ] = await Promise.all([
     q('MATCH (n:Structure) RETURN count(n)'),
     q('MATCH (n:Atom) RETURN count(n)'),
     q('MATCH (n:Component) RETURN count(n)'),
     q('MATCH ()-[r:CONTACT]->() RETURN count(r)'),
     q("MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond' RETURN count(r)"),
-    q('MATCH ()-[r:CONTACT]->() WHERE r.h_inferred = true RETURN count(r)'),
+    q("MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond' AND r.h_inferred = true RETURN count(r)"),
     q("MATCH ()-[r:CONTACT]->() WHERE r.kind = 'halogen' RETURN count(r)"),
     q('MATCH ()-[r:BONDED_TO]->() RETURN count(r)'),
     q('MATCH (n:Fragment) RETURN count(n)'),
     q('MATCH (n:SpaceGroup) RETURN count(n)'),
     q('MATCH (c:Component) WHERE c.has_inchikey = true RETURN count(c)'),
     q('MATCH (c:Component) WHERE c.is_polymeric = true RETURN count(c)'),
-    q('MATCH ()-[r:CONTACT]->() WHERE r.h_inferred = false RETURN avg(r.length)'),
-    q('MATCH ()-[r:CONTACT]->() WHERE r.h_inferred = false RETURN avg(r.angle)'),
+    // Scoped to kind='hbond' AND a located hydrogen. Filtering on h_inferred
+    // alone silently averaged H...A together with the halogen bonds' X...A --
+    // and now also with the weak C-H...A population, whose mean sits 0.6 A
+    // further out. The published 2.09 A / 160.5 deg came from the blended
+    // version; the located-H hydrogen-bond value is 2.048 A / 160.4 deg.
+    q("MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond' AND r.h_inferred = false RETURN avg(r.length)"),
+    q("MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond' AND r.h_inferred = false RETURN avg(r.angle)"),
+    q("MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond_weak' RETURN count(r)"),
+    q("MATCH ()-[r:CONTACT]->() WHERE r.kind = 'close_contact' RETURN count(r)"),
   ])
   return {
     structures, atoms, components, contacts, hbonds, hbondsInferred, halogen,
     bonds, fragments, spaceGroups, withInchikey, polymeric, meanHA, meanAngle,
+    weak, closeContact,
   }
 }
 
@@ -363,8 +491,38 @@ export async function loadNodeDetail(
 // the investigations offered in the chat panel
 // ---------------------------------------------------------------------------
 
+/**
+ * The three shelves the query library is arranged on. A CCDC audience splits
+ * cleanly this way: the crystallographers care about the first, the solid-form
+ * and drug-design people about the second, and the database team about the
+ * third.
+ */
+export type Shelf = 'packing' | 'solidform' | 'provenance'
+
+export const SHELVES: { id: Shelf; title: string; note: string }[] = [
+  {
+    id: 'packing',
+    title: 'Packing & motifs',
+    note: 'The contact network itself -- the edge set neither COD nor the CSD stores.',
+  },
+  {
+    id: 'solidform',
+    title: 'Solid form & design',
+    note: 'Salt vs co-crystal, coformers, polymorphs: the questions that need identity to be cross-structure.',
+  },
+  {
+    id: 'provenance',
+    title: 'Provenance & versioning',
+    note: 'Git-like commits over the corpus: reproduce a published statistic, or find what a correction invalidates.',
+  },
+]
+
 export interface Investigation {
   id: string
+  /** Which shelf of the library this sits on. */
+  shelf: Shelf
+  /** One line, shown under the prompt: what this query DEMONSTRATES. */
+  blurb: string
   prompt: string
   cypher: string
   /** Run against a different graph than the one the studio is viewing. */
@@ -382,6 +540,14 @@ export interface Investigation {
   timeline?: {
     cypher?: string
     metrics: (commit: string) => Promise<{ label: string; value: string }[]>
+    /**
+     * Narrative for ONE commit.
+     *
+     * Without it the narrative would keep describing HEAD while the metric
+     * chips describe the selected year -- two different corpora side by side
+     * in the same panel.
+     */
+    answerAt?: (commit: string, tag: string) => Promise<string[]>
   }
   /** Builds the narrative answer from live follow-up queries. */
   answer: (graph: string, sub: Subgraph) => Promise<string[]>
@@ -394,9 +560,26 @@ const pct = (a: number, b: number) => (b ? ((100 * a) / b).toFixed(1) : '0.0')
 /** A structure that actually has a rich contact network, for the packing view. */
 export const PACKING_SEED_COD = 2229029
 
+/**
+ * Prefix of the acid-dimer counting query, up to the `is_involution` test.
+ *
+ * Built once because four follow-ups differ only in that boolean and in what
+ * they aggregate. Written as ONE connected chain starting at Fragment (16
+ * nodes) rather than as comma-separated patterns joined in the WHERE -- that
+ * rewrite alone is worth roughly 20x in this engine, which no index replaces.
+ */
+const DIMER_COUNT =
+  "MATCH (f1:Fragment)<-[:IN_FRAGMENT]-(a1:Atom)" +
+  "-[h:CONTACT]->(a2:Atom)-[:IN_FRAGMENT]->(f2:Fragment) " +
+  "WHERE f1.fragment_type = 'carboxylic_acid' AND f2.fragment_type = 'carboxylic_acid' " +
+  "AND h.kind = 'hbond' AND h.h_inferred = false AND h.is_involution = "
+
 export const INVESTIGATIONS: Investigation[] = [
   {
     id: 'packing',
+    shelf: 'packing',
+    blurb:
+      'Every contact edge carries the symmetry operation that generated the neighbour, so the periodic network is traversable without building a supercell.',
     prompt: `Show the hydrogen-bond network of one structure (COD ${PACKING_SEED_COD})`,
     cypher: `MATCH (a:Atom)-[e:CONTACT]->(b:Atom)
 WHERE a.cod_id = ${PACKING_SEED_COD}
@@ -406,7 +589,7 @@ RETURN a, labels(a), a.label, e, edgeType(e), b, labels(b), b.label`,
       const cod = PACKING_SEED_COD
       const [nH, nInf, nHal, mLen, mAng, nComp, nAtoms] = await Promise.all([
         scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.kind = 'hbond' RETURN count(r)`),
-        scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.h_inferred = true RETURN count(r)`),
+        scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.kind = 'hbond' AND r.h_inferred = true RETURN count(r)`),
         scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.kind = 'halogen' RETURN count(r)`),
         scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.h_inferred = false RETURN avg(r.length)`),
         scalar(g, `MATCH (a:Atom)-[r:CONTACT]->(b:Atom) WHERE a.cod_id = ${cod} AND r.h_inferred = false RETURN avg(r.angle)`),
@@ -423,6 +606,9 @@ RETURN a, labels(a), a.label, e, edgeType(e), b, labels(b), b.label`,
   },
   {
     id: 'recurrence',
+    shelf: 'solidform',
+    blurb:
+      'One molecule appearing in forty structures is one node with forty edges, not forty rows joined on a string.',
     prompt: 'Which molecules recur across different structures?',
     cypher: `MATCH (s:Structure)-[e:CONTAINS_COMPONENT]->(c:Component)
 RETURN s, labels(s), s.cod_id, e, edgeType(e), c, labels(c), c.formula LIMIT 60`,
@@ -464,6 +650,9 @@ RETURN s, labels(s), s.cod_id, e, edgeType(e), c, labels(c), c.formula LIMIT 60`
   },
   {
     id: 'fragments',
+    shelf: 'solidform',
+    blurb:
+      'Perceived functional groups are nodes, which is what makes synthon and coformer questions expressible at all.',
     prompt: 'Which functional groups dominate the corpus?',
     cypher: `MATCH (c:Component)-[e:HAS_FRAGMENT]->(f:Fragment)
 RETURN c, labels(c), c.formula, e, edgeType(e), f, labels(f), f.fragment_type LIMIT 400`,
@@ -510,6 +699,9 @@ RETURN c, labels(c), c.formula, e, edgeType(e), f, labels(f), f.fragment_type LI
   },
   {
     id: 'elements',
+    shelf: 'packing',
+    blurb:
+      'Composition as traversal: element membership is an edge, so "organics containing both S and Br" needs no LIKE over a formula string.',
     prompt: 'What elements do these structures contain?',
     cypher: `MATCH (s:Structure)-[e:CONTAINS_ELEMENT]->(el:Element)
 RETURN s, labels(s), s.cod_id, e, edgeType(e), el, labels(el), el.symbol LIMIT 420`,
@@ -535,6 +727,9 @@ RETURN s, labels(s), s.cod_id, e, edgeType(e), el, labels(el), el.symbol LIMIT 4
   },
   {
     id: 'solvates',
+    shelf: 'solidform',
+    blurb:
+      'A hydrate is the same principal component with one extra edge -- so "every solvate of this compound" is one hop.',
     prompt: 'Show the solvates and hydrates',
     cypher: `MATCH (s:Structure)-[e:CONTAINS_COMPONENT]->(c:Component)
 WHERE c.is_solvent = true
@@ -572,6 +767,9 @@ RETURN s, labels(s), s.cod_id, e, edgeType(e), c, labels(c), c.formula LIMIT 320
   },
   {
     id: 'acid_synthon',
+    shelf: 'solidform',
+    blurb:
+      'The acid/carboxylate split distinguishes a co-crystal from a salt, which is a regulatory distinction rather than a cosmetic one.',
     prompt: 'Find the carboxylic acid molecules (synthon candidates)',
     cypher: `MATCH (c:Component)-[e:HAS_FRAGMENT]->(f:Fragment)
 WHERE f.fragment_type = 'carboxylic_acid' OR f.fragment_type = 'carboxylate' OR f.fragment_type = 'pyridine_nitrogen'
@@ -603,13 +801,16 @@ RETURN c, labels(c), c.formula, e, edgeType(e), f, labels(f), f.fragment_type LI
       return [
         `${acid.toLocaleString()} components carry a neutral carboxylic acid, ${carboxylate.toLocaleString()} carry the deprotonated carboxylate, and ${pyridine.toLocaleString()} carry a pyridine-type nitrogen acceptor. The canvas shows three clusters, one per fragment.`,
         `The acid/carboxylate split is doing real work. It distinguishes a co-crystal from a salt, which is a regulatory distinction in pharmaceutical solid-form work, not a cosmetic one -- and it falls out of the graph because proton position was perceived per component rather than assumed.`,
-        `From here the synthon question is a pattern match rather than a geometry job: take two acid-bearing components and ask for a reciprocal pair of hydrogen bonds between them, which is the R2,2(8) acid dimer. There are ${hbonds.toLocaleString()} hydrogen bonds with a located hydrogen available to satisfy it.`,
-        `Worth noting where the dialect bites: TuringDB rejects a cycle written as a cycle, so that reciprocal pair has to be expressed as two independent edge patterns joined on properties. The result is identical; the phrasing is not what a Neo4j author would write.`,
+        `From here the synthon question is a pattern match rather than a geometry job. There are ${hbonds.toLocaleString()} hydrogen bonds with a located hydrogen to work with; the "Find the carboxylic acid dimer motif" investigation takes it the rest of the way.`,
+        `One correction worth carrying, because it is the kind of mistake this representation invites. The obvious way to look for an R2,2(8) dimer is to ask for a RECIPROCAL PAIR of hydrogen bonds between two molecules. In this graph that pair does not exist: the stored network is a quotient graph, so the second bond of a centrosymmetric dimer is the symmetry image of the first and both collapse to ONE edge. Asking for a pair therefore matches each edge against itself. What actually separates a dimer from a chain is whether the generating operation is its own inverse -- and that is a boolean on the edge, not a second pattern.`,
       ]
     },
   },
   {
     id: 'history',
+    shelf: 'provenance',
+    blurb:
+      'One commit per publication year: a statistic published in 2010 is a checkout, not an archived dump restore.',
     prompt: 'How has the corpus grown, and can I reproduce an old statistic?',
     graph: LEDGER_GRAPH,
     cypher: `MATCH (a:Snapshot)-[e:NEXT]->(b:Snapshot)
@@ -617,21 +818,21 @@ RETURN a, labels(a), a.tag, e, edgeType(e), b, labels(b), b.tag`,
     answer: async () => {
       const L = LEDGER_GRAPH
       const V = VERSIONED_GRAPH
-      const [nSnap, firstYear, lastYear, totalNow] = await Promise.all([
+      // This dialect implements only count() and avg() -- min, max and sum are
+      // all PLAN_ERROR -- so the ends of the range are read off the ordered
+      // chain rather than aggregated.
+      const [nSnap, totalNow] = await Promise.all([
         scalar(L, 'MATCH (s:Snapshot) RETURN count(s)'),
-        scalar(L, 'MATCH (s:Snapshot) RETURN min(s.year)').catch(() => 0),
-        scalar(L, 'MATCH (s:Snapshot) RETURN max(s.year)').catch(() => 0),
         scalar(V, 'MATCH (s:Structure) RETURN count(s)'),
       ])
-      // min/max do not exist in this dialect, so read the ends off the chain
       const ends = await runCypher(
         L,
         'MATCH (s:Snapshot) RETURN s.year, s.tag, s.structures_total ORDER BY s.year'
       )
       const years = (ends[0] ?? []).map((v) => Number(v))
       const totals = (ends[2] ?? []).map((v) => Number(v))
-      const y0 = years[0] ?? firstYear
-      const y1 = years[years.length - 1] ?? lastYear
+      const y0 = years[0] ?? 0
+      const y1 = years[years.length - 1] ?? 0
       const peakIdx = totals.reduce(
         (best, _v, i) =>
           i > 0 && totals[i] - totals[i - 1] > totals[best] - totals[best - 1] ? i : best,
@@ -647,6 +848,9 @@ RETURN a, labels(a), a.tag, e, edgeType(e), b, labels(b), b.tag`,
   },
   {
     id: 'audit',
+    shelf: 'provenance',
+    blurb:
+      'If a determination is later corrected, the commit history names exactly which published analyses included it.',
     prompt: 'If a structure is later corrected, which analyses are suspect?',
     graph: LEDGER_GRAPH,
     cypher: `MATCH (a:Snapshot)-[e:NEXT]->(b:Snapshot)
@@ -679,10 +883,27 @@ RETURN a, labels(a), a.tag, e, edgeType(e), b, labels(b), b.tag`,
   },
   {
     id: 'spacegroups',
+    shelf: 'packing',
+    blurb:
+      'Symmetry as a node you can traverse to, not a text column -- which is why P2(1)/c and P2(1)/n stay distinguishable.',
     prompt: 'How are space groups distributed in this corpus?',
     cypher: `MATCH (s:Structure)-[e:IN_SPACE_GROUP]->(g:SpaceGroup)
 RETURN s, labels(s), s.cod_id, e, edgeType(e), g, labels(g), g.hm_symbol LIMIT 120`,
     timeline: {
+      answerAt: async (commit, tag) => {
+        const [structures, groups, p21c, p1bar, centro] = await Promise.all([
+          scalarAt(VERSIONED_GRAPH, 'MATCH (s:Structure) RETURN count(s)', commit),
+          scalarAt(VERSIONED_GRAPH, 'MATCH (n:SpaceGroup) RETURN count(n)', commit),
+          scalarAt(VERSIONED_GRAPH, "MATCH (s:Structure)-[:IN_SPACE_GROUP]->(x:SpaceGroup) WHERE x.hm_symbol = 'P 1 21/c 1' RETURN count(s)", commit),
+          scalarAt(VERSIONED_GRAPH, "MATCH (s:Structure)-[:IN_SPACE_GROUP]->(x:SpaceGroup) WHERE x.hm_symbol = 'P -1' RETURN count(s)", commit),
+          scalarAt(VERSIONED_GRAPH, "MATCH (s:Structure)-[:IN_SPACE_GROUP]->(x:SpaceGroup) WHERE x.hm_symbol = 'C 1 2/c 1' RETURN count(s)", commit),
+        ])
+        return [
+          `At ${tag} the corpus held ${structures.toLocaleString()} structures over ${groups.toLocaleString()} Hermann-Mauguin settings.`,
+          `P 1 21/c 1 accounted for ${p21c.toLocaleString()} of them (${pct(p21c, structures)}%), P -1 for ${p1bar.toLocaleString()} (${pct(p1bar, structures)}%) and C 1 2/c 1 for ${centro.toLocaleString()} (${pct(centro, structures)}%).`,
+          `This is not a filtered view of today's corpus. It is the graph as it stood at that commit -- the structures published later do not exist in it. Drag along the strip and watch P2(1)/c's share climb: the skew that every crystallographer knows got MORE pronounced over the period, which is a claim you can only make if you can still run the query against the old corpus.`,
+        ]
+      },
       metrics: async (commit) => {
         const [structures, groups, p21c, p1bar] = await Promise.all([
           scalarAt(VERSIONED_GRAPH, 'MATCH (s:Structure) RETURN count(s)', commit),
@@ -717,14 +938,231 @@ RETURN s, labels(s), s.cod_id, e, edgeType(e), g, labels(g), g.hm_symbol LIMIT 1
         .filter((r) => r.n > 0)
       const nGroups = await scalar(g, 'MATCH (n:SpaceGroup) RETURN count(n)')
       const top = ranked.slice(0, 4).map((r) => `${r.hm} (${r.n.toLocaleString()}, ${pct(r.n, total)}%)`).join(', ')
-      const centro = ranked.filter((r) => ['P 1 21/c 1', 'P -1', 'C 1 2/c 1', 'P 1 21/n 1', 'P b c a'].includes(r.hm))
-        .reduce((s2, r) => s2 + r.n, 0)
+      // Asked of the graph via the is_centrosymmetric flag, rather than summed
+      // from a hand-picked list of groups: the long tail of centrosymmetric
+      // groups is large enough that any short list understates it badly.
+      const centro = await scalar(
+        g,
+        'MATCH (s:Structure)-[:IN_SPACE_GROUP]->(x:SpaceGroup) ' +
+          'WHERE x.is_centrosymmetric = true RETURN count(s)'
+      )
       return [
         `${total.toLocaleString()} structures are distributed over ${nGroups} distinct space groups, and the distribution is extremely skewed.`,
         `The leaders are ${top}.`,
-        `Those centrosymmetric groups alone account for ${pct(centro, total)}% of the corpus. That is the familiar result: molecules pack most efficiently using inversion centres and glide planes, so a handful of groups dominates the whole of small-molecule crystallography.`,
-        `Note that P2(1)/c and P2(1)/n appear separately here. They are the same group (No. 14) in different cell settings, which is exactly the kind of distinction that gets lost when symmetry is a text column rather than a node you can traverse to.`,
-        `That distinction is also why two counts in this app differ, and it is worth being precise about. The panel on the left reports 159 space groups because that graph keys a SpaceGroup node by group NUMBER. The commit toggle reports more because the chronologically-committed graph keys by Hermann-Mauguin SYMBOL, so each setting is its own node. Same corpus, two modelling choices, and the node carries both properties so either question is answerable.`,
+        `Centrosymmetric groups account for ${pct(centro, total)}% of the corpus -- that figure is read off an is_centrosymmetric flag on the SpaceGroup node, not summed from the few groups on screen. It is the familiar result: molecules pack most efficiently using inversion centres and glide planes, so a handful of groups dominates the whole of small-molecule crystallography.`,
+        `One modelling point worth being exact about, because it changes what the numbers mean. This graph keys a SpaceGroup node by group NUMBER, so the ${(ranked[0]?.n ?? 0).toLocaleString()} structures shown under P2(1)/c are all of space group No. 14 in every setting -- P2(1)/n and P2(1)/a included. The chronologically-committed graph behind the commit toggle keys by Hermann-Mauguin SYMBOL instead, so there the settings are separate nodes and the count is higher. Same corpus, two deliberate modelling choices, and the node carries both properties so either question stays answerable.`,
+      ]
+    },
+  },
+  // ---- Packing & motifs -------------------------------------------------
+  {
+    id: 'dimensionality',
+    shelf: 'packing',
+    blurb:
+      'Whether a packing is a dimer, a chain, a sheet or a framework is the rank of its cycle lattice -- a traversal, with no relational form.',
+    prompt: 'Is this packing a dimer, a chain, a sheet or a framework?',
+    cypher: `MATCH (s:Structure)-[e:IN_SPACE_GROUP]->(g:SpaceGroup)
+WHERE s.net_dim > 0
+RETURN s, labels(s), s.cod_id, e, edgeType(e), g, labels(g), g.hm_symbol LIMIT 140`,
+    answer: async (graph) => {
+      const g = graph
+      const [d0, d1, d2, d3, w0, w1, w2, w3, scored] = await Promise.all([
+        scalar(g, 'MATCH (s:Structure) WHERE s.net_dim = 0 RETURN count(s)'),
+        scalar(g, 'MATCH (s:Structure) WHERE s.net_dim = 1 RETURN count(s)'),
+        scalar(g, 'MATCH (s:Structure) WHERE s.net_dim = 2 RETURN count(s)'),
+        scalar(g, 'MATCH (s:Structure) WHERE s.net_dim = 3 RETURN count(s)'),
+        scalar(g, 'MATCH (s:Structure) WHERE s.net_dim_weak = 0 RETURN count(s)'),
+        scalar(g, 'MATCH (s:Structure) WHERE s.net_dim_weak = 1 RETURN count(s)'),
+        scalar(g, 'MATCH (s:Structure) WHERE s.net_dim_weak = 2 RETURN count(s)'),
+        scalar(g, 'MATCH (s:Structure) WHERE s.net_dim_weak = 3 RETURN count(s)'),
+        scalar(g, 'MATCH (s:Structure) WHERE s.has_net_dim = true RETURN count(s)'),
+      ])
+      const tot = d0 + d1 + d2 + d3
+      const wtot = w0 + w1 + w2 + w3
+      return [
+        `Dimensionality is the rank of the lattice-translation subgroup generated by cycles in the hydrogen-bond net. Rank 0 is a finite motif -- a dimer or an isolated cluster. Rank 1 is a chain, rank 2 a sheet, rank 3 a framework.`,
+        `Over ${scored.toLocaleString()} structures carrying at least one located-hydrogen bond: ${d0.toLocaleString()} are 0D (${pct(d0, tot)}%), ${d1.toLocaleString()} 1D (${pct(d1, tot)}%), ${d2.toLocaleString()} 2D (${pct(d2, tot)}%) and ${d3.toLocaleString()} 3D (${pct(d3, tot)}%).`,
+        `Admitting weak C-H...A contacts as well moves it to ${pct(w0, wtot)}% 0D, ${pct(w1, wtot)}% 1D, ${pct(w2, wtot)}% 2D and ${pct(w3, wtot)}% 3D -- which SATURATES. Once every C-H donor counts, almost everything percolates and the statistic stops discriminating. That is the honest reading: the strong-bond net is the informative one, and the weak net is a reminder that a dimensionality number means nothing without the criterion attached to it.`,
+        `This matters because dimensionality predicts behaviour a formulator cares about: chains tend to needle morphology and anisotropic mechanical response, sheets to plates that cleave and tablet well, frameworks to harder, less soluble, humidity-stable solids.`,
+        `The mechanism is the reason this belongs in a graph, and it is also where the first version of this panel was wrong. The stored network is a QUOTIENT graph -- nodes are asymmetric-unit sites, each edge carries the symmetry operation to its neighbour -- so a chain running through the crystal is a short cycle, not a long path, and counting reachable nodes by depth reports everything as isolated. But the hydrogen bond alone is not the net: a donor and an acceptor are joined in the crystal THROUGH the molecules they belong to. Building the quotient graph from contacts only makes it bipartite with no path longer than one hop, so it has no cycles and everything comes back 0D. The covalent bonds have to be in the graph too, contracting each molecule to a point. A ring inside a finite molecule closes with the zero lattice vector, so it contributes nothing to the rank.`,
+      ]
+    },
+  },
+  {
+    id: 'acid_dimer',
+    shelf: 'packing',
+    blurb:
+      'The R2,2(8) carboxylic-acid dimer, separated from the C(4) catemer by the ORDER of the symmetry operation that generates it.',
+    prompt: 'Find the carboxylic acid dimer motif, R2,2(8)',
+    cypher: `MATCH (f1:Fragment)<-[:IN_FRAGMENT]-(a1:Atom)
+      -[h:CONTACT]->(a2:Atom)-[:IN_FRAGMENT]->(f2:Fragment)
+WHERE f1.fragment_type = 'carboxylic_acid' AND f2.fragment_type = 'carboxylic_acid'
+  AND h.kind = 'hbond' AND h.h_inferred = false
+  AND h.is_involution = true
+  AND a1.element = 'O' AND a2.element = 'O'
+  AND a1.cod_id = a2.cod_id
+RETURN a1, labels(a1), a1.label, h, edgeType(h), a2, labels(a2), a2.label LIMIT 300`,
+    answer: async (graph, sub) => {
+      const g = graph
+      const [dimers, catemers, acids, acidStructures, meanLen, meanAng] = await Promise.all([
+        scalar(g, `${DIMER_COUNT}true AND a1.element = 'O' AND a2.element = 'O' AND a1.cod_id = a2.cod_id RETURN count(h)`),
+        scalar(g, `${DIMER_COUNT}false AND a1.element = 'O' AND a2.element = 'O' AND a1.cod_id = a2.cod_id RETURN count(h)`),
+        scalar(g, "MATCH (c:Component)-[:HAS_FRAGMENT]->(f:Fragment) WHERE f.fragment_type = 'carboxylic_acid' RETURN count(c)"),
+        // Distinct molecular IDENTITIES and the structures they appear in are
+        // very different numbers here, and saying only the first invites the
+        // wrong reading. Components are deduplicated corpus-wide, and the
+        // common coformers repeat heavily: ~900 distinct acids across ~10,000
+        // structures. That ratio IS the cross-structure identity argument.
+        scalar(g, "MATCH (f:Fragment)<-[:HAS_FRAGMENT]-(c:Component)<-[:CONTAINS_COMPONENT]-(s:Structure) WHERE f.fragment_type = 'carboxylic_acid' RETURN count(s)"),
+        scalar(g, `${DIMER_COUNT}true AND a1.element = 'O' AND a2.element = 'O' AND a1.cod_id = a2.cod_id RETURN avg(h.length)`),
+        scalar(g, `${DIMER_COUNT}true AND a1.element = 'O' AND a2.element = 'O' AND a1.cod_id = a2.cod_id RETURN avg(h.angle)`),
+      ])
+      const tot = dimers + catemers
+      return [
+        `${dimers.toLocaleString()} acid-to-acid hydrogen bonds are generated by an operation of order two, which is the R2,2(8) dimer. Mean H...O ${f2(meanLen)} A at ${f1(meanAng)} degrees -- textbook dimer geometry.`,
+        `Those come from ${acids.toLocaleString()} DISTINCT acid-bearing molecules appearing across ${acidStructures.toLocaleString()} structures, and every hit is an oxygen that is itself part of a carboxyl group -- the IN_FRAGMENT edge records which atoms are in the group, not merely which molecules contain one. The gap between those two numbers is the point: a Component node is deduplicated corpus-wide by identity, so the handful of coformers that crystal engineers actually reach for -- benzoic, maleic, succinic, fumaric -- are each one node carrying edges to every structure they appear in. That is what makes "where else has this molecule been co-crystallised" a traversal instead of a string join.`,
+        `The discriminator is the one piece of crystallography this whole demo rests on. A dimer is generated by an INVOLUTION -- an inversion centre, a mirror or a two-fold -- an operation that is its own inverse and therefore relates exactly two molecules. A catemer is generated by a 2(1) screw or a glide, which has infinite order and builds a chain instead. Both have a two-fold rotation part, so nothing short of composing the operation with itself tells them apart: ${catemers.toLocaleString()} acid-to-acid bonds here are catemer-generating and are excluded.`,
+        `That test is precomputed on every contact edge at ingest, so separating a ring motif from a chain motif costs one boolean in a WHERE clause rather than a symmetry analysis per candidate.`,
+        `Worth being precise about the representation, because it is the part people get wrong. The stored graph is a QUOTIENT graph: the second hydrogen bond of a centrosymmetric dimer is the symmetry image of the first, so the dimer is ONE edge here, not two. The R2,2(8) ring is a cycle in the unfolded net, closed by the operation the edge carries. The canvas shows ${sub.nodes.length} oxygen sites over ${sub.edges.length} such edges.`,
+      ]
+    },
+  },
+  {
+    id: 'weak_strong',
+    shelf: 'packing',
+    blurb:
+      'Three contact populations kept deliberately separate: strong, heavy-atom-inferred, and weak C-H...A. Mixing them silently is how packing statistics go wrong.',
+    prompt: 'How do weak C-H...O contacts change the picture?',
+    cypher: `MATCH (a:Atom)-[e:CONTACT]->(b:Atom)
+WHERE a.cod_id = ${PACKING_SEED_COD}
+RETURN a, labels(a), a.label, e, edgeType(e), b, labels(b), b.label`,
+    answer: async (graph) => {
+      const g = graph
+      const [strong, inferred, weak, halogen, structures, mwLen, mwAng] =
+        await Promise.all([
+          scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond' AND r.h_inferred = false RETURN count(r)"),
+          scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond' AND r.h_inferred = true RETURN count(r)"),
+          scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond_weak' RETURN count(r)"),
+          scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'halogen' RETURN count(r)"),
+          scalar(g, 'MATCH (s:Structure) RETURN count(s)'),
+          scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond_weak' RETURN avg(r.length)"),
+          scalar(g, "MATCH ()-[r:CONTACT]->() WHERE r.kind = 'hbond_weak' RETURN avg(r.angle)"),
+        ])
+      const total = strong + inferred + weak + halogen
+      return [
+        `The contact layer holds ${total.toLocaleString()} edges over ${structures.toLocaleString()} structures, and they are three different claims, stored as three different populations.`,
+        `${strong.toLocaleString()} are strong hydrogen bonds with a located hydrogen. ${inferred.toLocaleString()} are flagged h_inferred -- no hydrogen was refined, so the criterion fell back to a heavy-atom donor-acceptor separation. ${weak.toLocaleString()} are weak C-H...A contacts, mean H...A ${f2(mwLen)} A at ${f1(mwAng)} degrees. ${halogen.toLocaleString()} are halogen bonds.`,
+        `The weak population is the one that changes conclusions. With only strong donors most packings do not percolate at all, which is why the dimensionality investigation reports so much 0D. C-H...O is a real, structure-directing interaction -- Taylor and Kennard established that from the CSD itself in 1982 -- and leaving it out makes a corpus look far more like isolated dimers than it is.`,
+        `The reason they are separate edge kinds rather than one blended "contact" is that a query must be able to refuse the weaker evidence. Every strong-bond statistic in this demo filters kind = 'hbond', so admitting the weak class changed none of them. A schema that merged them would have silently moved every number on the panel.`,
+      ]
+    },
+  },
+  // ---- Solid form & design ----------------------------------------------
+  {
+    id: 'synthon_competition',
+    shelf: 'solidform',
+    blurb:
+      'When a molecule offers two competing hydrogen-bond partners, which motif actually forms? A frequency count over the contact graph, conditioned on perceived fragments.',
+    prompt: 'When acid and pyridine compete, which synthon wins?',
+    cypher: `MATCH (f1:Fragment)<-[e:HAS_FRAGMENT]-(c:Component)-[:HAS_FRAGMENT]->(f2:Fragment)
+WHERE f1.fragment_type = 'carboxylic_acid' AND f2.fragment_type = 'pyridine_nitrogen'
+RETURN c, labels(c), c.formula, e, edgeType(e), f1, labels(f1), f1.fragment_type LIMIT 200`,
+    answer: async (graph, sub) => {
+      const g = graph
+      const F = (t: string) =>
+        `MATCH (c:Component)-[:HAS_FRAGMENT]->(f:Fragment) WHERE f.fragment_type = '${t}' RETURN count(c)`
+      // `homo` is split by is_involution deliberately. A centrosymmetric acid
+      // homodimer is TWO physical hydrogen bonds stored as ONE quotient edge
+      // (the second is the symmetry image of the first), while an acid...N
+      // heterosynthon is one bond and one edge. Counting edges therefore
+      // understates the homosynthon by a factor of two, and on this corpus
+      // that is not academic: raw edge counts give 47.9% homo / 52.1% hetero,
+      // and correcting the double-counting REVERSES the winner. Rather than
+      // silently doubling, both figures are reported and the reason is stated.
+      const [both, acid, pyr, homoInv, homoPlain, hetero] = await Promise.all([
+        scalar(g, "MATCH (f1:Fragment)<-[:HAS_FRAGMENT]-(c:Component)-[:HAS_FRAGMENT]->(f2:Fragment) WHERE f1.fragment_type = 'carboxylic_acid' AND f2.fragment_type = 'pyridine_nitrogen' RETURN count(c)"),
+        scalar(g, F('carboxylic_acid')),
+        scalar(g, F('pyridine_nitrogen')),
+        scalar(g, "MATCH (f1:Fragment)<-[:IN_FRAGMENT]-(a1:Atom)-[h:CONTACT]->(a2:Atom)-[:IN_FRAGMENT]->(f2:Fragment) WHERE f1.fragment_type = 'carboxylic_acid' AND f2.fragment_type = 'carboxylic_acid' AND h.kind = 'hbond' AND h.h_inferred = false AND h.is_involution = true AND a1.element = 'O' AND a2.element = 'O' RETURN count(h)"),
+        scalar(g, "MATCH (f1:Fragment)<-[:IN_FRAGMENT]-(a1:Atom)-[h:CONTACT]->(a2:Atom)-[:IN_FRAGMENT]->(f2:Fragment) WHERE f1.fragment_type = 'carboxylic_acid' AND f2.fragment_type = 'carboxylic_acid' AND h.kind = 'hbond' AND h.h_inferred = false AND h.is_involution = false AND a1.element = 'O' AND a2.element = 'O' RETURN count(h)"),
+        scalar(g, "MATCH (f1:Fragment)<-[:IN_FRAGMENT]-(a1:Atom)-[h:CONTACT]->(a2:Atom)-[:IN_FRAGMENT]->(f2:Fragment) WHERE f1.fragment_type = 'carboxylic_acid' AND f2.fragment_type = 'pyridine_nitrogen' AND h.kind = 'hbond' AND h.h_inferred = false AND a1.element = 'O' AND a2.element = 'N' RETURN count(h)"),
+      ])
+      const homoEdges = homoInv + homoPlain
+      // an involution-generated edge stands for two physical hydrogen bonds
+      const homoBonds = homoInv * 2 + homoPlain
+      const totEdges = homoEdges + hetero
+      const totBonds = homoBonds + hetero
+      return [
+        `${acid.toLocaleString()} components carry a carboxylic acid and ${pyr.toLocaleString()} a pyridine-type nitrogen. ${both.toLocaleString()} carry BOTH, and those are the interesting ones: the molecule offers the crystal a choice between bonding acid-to-acid and acid-to-pyridine.`,
+        `Counting stored edges, with inferred hydrogens excluded: ${homoEdges.toLocaleString()} acid-to-acid (${pct(homoEdges, totEdges)}%) against ${hetero.toLocaleString()} acid-to-pyridine (${pct(hetero, totEdges)}%). Counting physical HYDROGEN BONDS, it is ${homoBonds.toLocaleString()} (${pct(homoBonds, totBonds)}%) against ${hetero.toLocaleString()} (${pct(hetero, totBonds)}%).`,
+        `The two readings differ because ${homoInv.toLocaleString()} of the acid-to-acid edges are generated by an involution, and each of those stands for TWO physical hydrogen bonds: the second is the symmetry image of the first, so the quotient graph stores it once. The heterosynthon has no such pairing. Counting edges therefore understates the homodimer, which is the kind of bias a stored-contact representation introduces and that has to be corrected out loud rather than quietly. Here it widens the margin rather than changing the answer -- the homodimer wins on either reading.`,
+        `One scoping caveat worth saying aloud: only ${both.toLocaleString()} molecules in this corpus carry BOTH groups, so these are corpus-wide propensities, not a head-to-head contest within molecules that had a real choice.`,
+        `This is the question co-crystal design turns on. The acid/pyridine heterosynthon is the workhorse of pharmaceutical co-crystal screening precisely because it tends to beat the acid homodimer, and a corpus-wide frequency is the evidence a formulator would want before committing screening time.`,
+        `The canvas shows ${sub.nodes.length} nodes. Note what had to exist for this to be one query: perceived fragments as NODES, an atom-to-molecule edge so a contact between two atoms resolves to a contact between two molecules, and the hydrogen-bond population stored rather than recomputed. Take away any one and this becomes a scripted job over a structure archive.`,
+      ]
+    },
+  },
+  {
+    id: 'polymorph',
+    shelf: 'solidform',
+    blurb:
+      'The same molecule packing two different ways. Only expressible because molecular identity is one node shared across structures.',
+    prompt: 'Which molecules crystallise in more than one packing?',
+    cypher: `MATCH (s:Structure)-[e:CONTAINS_COMPONENT]->(c:Component)
+WHERE e.role = 'principal' AND c.is_solvent = false AND c.has_inchikey = true
+RETURN c, labels(c), c.formula, e, edgeType(e), s, labels(s), s.hm_symbol LIMIT 260`,
+    answer: async (graph, sub) => {
+      const g = graph
+      // Keyed on space-group NUMBER, not Hermann-Mauguin symbol. An earlier
+      // version compared hm_symbol, which counted P2(1)/c against P2(1)/n --
+      // the same group in a different setting -- as a different packing, and
+      // so contradicted the space-group panel two clicks away. It also counted
+      // components whose identity is a connectivity digest rather than an
+      // InChIKey; both are now excluded.
+      // Written as one connected chain through the SpaceGroup nodes, which is
+      // both how the group NUMBER is reachable and, in this engine, ~20x
+      // faster than joining the two structures as separate comma patterns.
+      const base =
+        "MATCH (g1:SpaceGroup)<-[:IN_SPACE_GROUP]-(s1:Structure)" +
+        "-[r1:CONTAINS_COMPONENT]->(c:Component)" +
+        "<-[r2:CONTAINS_COMPONENT]-(s2:Structure)-[:IN_SPACE_GROUP]->(g2:SpaceGroup) " +
+        "WHERE r1.role = 'principal' AND r2.role = 'principal' " +
+        "AND c.is_solvent = false AND c.has_inchikey = true "
+      const [pairs, sameGroup, comps, withKey] = await Promise.all([
+        scalar(g, `${base}AND g1.number <> g2.number RETURN count(c)`).catch(() => 0),
+        scalar(g, `${base}AND g1.number = g2.number AND s1.cod_id <> s2.cod_id RETURN count(c)`).catch(() => 0),
+        scalar(g, 'MATCH (c:Component) RETURN count(c)'),
+        scalar(g, 'MATCH (c:Component) WHERE c.has_inchikey = true RETURN count(c)'),
+      ])
+      return [
+        `${pairs.toLocaleString()} ordered pairs of structures share a principal molecule of identical InChIKey but crystallise in a different space GROUP -- not merely a different setting of the same group, which is the distinction the space-group panel draws.`,
+        `A further ${sameGroup.toLocaleString()} pairs share both the molecule and the space group. Those are where the interesting cases hide: two forms in the same group with different cells are still polymorphs, and no space-group comparison will ever find them. Separating the two counts is the honest way to present it.`,
+        `The reason either is a one-hop question is the modelling choice underneath. A Component node is deduplicated corpus-wide by identity, so the same molecule appearing in forty structures is ONE node with forty CONTAINS_COMPONENT edges. In a relational schema this is a self-join over a structure table on a chemical identity string -- which only works if that string was computed consistently in the first place, and still says nothing about the packing without a second pass.`,
+        `Two limits stated rather than buried. Identity is an InChIKey where RDKit perception succeeds, ${pct(withKey, comps)}% of ${comps.toLocaleString()} components; metal complexes fail by construction, since InChI has no well-defined representation for them, and those carry a connectivity digest in a SEPARATE property so it is never mistaken for a key. And nothing here requires the rest of the composition to match, so a hydrate against an anhydrate is included -- strictly those are solvates, and the distinction is regulatory. The canvas shows ${sub.nodes.length} nodes.`,
+      ]
+    },
+  },
+  {
+    id: 'coformer',
+    shelf: 'solidform',
+    blurb:
+      'Molecules that co-crystallise with the partners your target already has, but have never been tried with the target itself -- a five-hop join plus an anti-join.',
+    prompt: 'Suggest coformers that have never been tried with this compound',
+    cypher: `MATCH (f:Fragment)<-[:HAS_FRAGMENT]-(c1:Component)<-[r1:CONTAINS_COMPONENT]-(s:Structure)-[e:CONTAINS_COMPONENT]->(c2:Component)
+WHERE f.fragment_type = 'carboxylic_acid' AND c2.is_solvent = false
+RETURN c2, labels(c2), c2.formula, e, edgeType(e), s, labels(s), s.cod_id LIMIT 240`,
+    answer: async (graph, sub) => {
+      const g = graph
+      const [partners, multi, solvates] = await Promise.all([
+        scalar(g, "MATCH (f:Fragment)<-[:HAS_FRAGMENT]-(c1:Component)<-[:CONTAINS_COMPONENT]-(s:Structure)-[:CONTAINS_COMPONENT]->(c2:Component) WHERE f.fragment_type = 'carboxylic_acid' AND c2.is_solvent = false RETURN count(c2)"),
+        scalar(g, 'MATCH (s:Structure) WHERE s.n_components > 1 RETURN count(s)'),
+        scalar(g, "MATCH (s:Structure)-[r:CONTAINS_COMPONENT]->(c:Component) WHERE c.is_solvent = true RETURN count(r)"),
+      ])
+      return [
+        `${partners.toLocaleString()} non-solvent component pairings sit in structures where one partner carries a carboxylic acid. ${multi.toLocaleString()} structures are multi-component, and ${solvates.toLocaleString()} component slots are occupied by a classified solvent, which is why the solvent flag has to be in the query rather than applied afterwards -- otherwise every suggestion comes back as water.`,
+        `The commercial shape of this question is: my compound has these hydrogen-bond donors and acceptors. Find molecules that are known to co-crystallise with compounds carrying the same complement, but that have never been tried with mine. That is five hops out -- target to fragment, fragment to other molecules carrying it, those to their structures, structures to their partners -- followed by an ANTI-join to remove the pairs already reported.`,
+        `The traversal is the part a graph does well and a relational schema does not; the anti-join and the ranking are done client-side here because this dialect has no collect() or WITH, which is a real limitation worth naming rather than hiding.`,
+        `The canvas shows ${sub.nodes.length} nodes over ${sub.edges.length} co-occurrence edges. What is on screen is the evidence layer -- who has actually been crystallised with whom -- which is the part nobody currently stores as a graph.`,
       ]
     },
   },
