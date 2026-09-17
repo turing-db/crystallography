@@ -43,19 +43,58 @@ if [[ "${1:-}" == "--ingest" ]]; then
   echo "==> building the graph"
   # --out is explicit: build_graph would otherwise emit data/jsonl/slice.jsonl
   # while load_turingdb below reads cod_slice.jsonl, and the mismatch only
-  # shows up as a missing file at the end of a 20-minute ingest.
+  # shows up as a missing file at the end of a long ingest.
   uv run python -m ingest.build_graph --dataset slice \
       --out data/jsonl/cod_slice.jsonl
-  uv run python -m ingest.project_contacts
+  uv run python -m ingest.project_contacts \
+      --in data/jsonl/cod_slice.jsonl --out data/jsonl/cod_contacts_v2.jsonl
   echo "==> loading into TuringDB"
   TURING_HOST="http://localhost:$TURING_PORT" \
     uv run python -m ingest.load_turingdb \
       --jsonl data/jsonl/cod_slice.jsonl --graph cod_slice_v2 \
       --host "http://localhost:$TURING_PORT" --turing-dir "$TURING_DIR"
+  TURING_HOST="http://localhost:$TURING_PORT" \
+    uv run python -m ingest.load_turingdb \
+      --jsonl data/jsonl/cod_contacts_v2.jsonl --graph cod_contacts_v2 \
+      --host "http://localhost:$TURING_PORT" --turing-dir "$TURING_DIR"
   echo "==> building the chronologically-committed corpus (one commit per year)"
   uv run python -m ingest.build_versioned \
       --host "http://localhost:$TURING_PORT" --per-year 0 --fresh
 fi
+
+# A graph that exists on disk is NOT resident after a server start, and an
+# unloaded graph answers GRAPH_NOT_FOUND rather than returning nothing -- which
+# reads as "the demo is broken" rather than "load it first". Load whatever is
+# there, and say plainly when there is nothing.
+echo "==> loading graphs"
+uv run python - "$TURING_PORT" <<'PY'
+import sys
+from turingdb import TuringDB
+
+host = f"http://localhost:{sys.argv[1]}"
+c = TuringDB(host=host)
+try:
+    available = set(c.list_available_graphs()["graphName"])
+except Exception as exc:
+    print(f"    cannot reach TuringDB at {host}: {exc}")
+    raise SystemExit(1)
+
+wanted = [g for g in ("cod_slice_v2", "cod_contacts_v2",
+                      "cod_versioned", "cod_versions") if g in available]
+if not wanted:
+    print("    no crystallography graphs on this server yet.")
+    print("    Run  ./run.sh --ingest  to acquire COD and build them")
+    print("    (~2.8 GB of CIFs, roughly 25 minutes).")
+    raise SystemExit(0)
+
+for g in wanted:
+    try:
+        c.load_graph(g)
+        print(f"    loaded {g}")
+    except Exception as exc:
+        # already loaded is the common, harmless case
+        print(f"    {g}: {str(exc)[:80]}")
+PY
 
 echo "==> frontend"
 cd visualizer

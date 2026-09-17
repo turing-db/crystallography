@@ -20,22 +20,18 @@ shell or from the browser.
 ```bash
 git clone https://github.com/turing-db/crystallography
 cd crystallography
-./run.sh
+./run.sh --ingest        # first run only
 ```
+
+The structures themselves are not in the repository: they are 2.8 GB of CIFs
+belonging to COD, so the first run acquires them. It takes roughly 25 minutes
+and needs network access to `crystallography.net`. Afterwards, `./run.sh` on its
+own starts the server and the studio on the data already built.
 
 `run.sh` installs dependencies with `uv`, starts a TuringDB server on port 6691
 with the data directory `./turing-data`, builds the front end and serves it on
 port 8087. The server binary ships inside the `turingdb` Python wheel; there is
 no separate database to install.
-
-To rebuild the graphs from COD rather than using prebuilt data:
-
-```bash
-./run.sh --ingest
-```
-
-That acquires ~2.8 GB of CIFs by rsync, parses them, and loads four graphs. It
-takes roughly 25 minutes and needs network access to `crystallography.net`.
 
 ### Checking it is alive
 

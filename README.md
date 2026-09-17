@@ -20,9 +20,12 @@ remit.
 ## Quick start
 
 ```bash
-./run.sh              # start TuringDB + the UI on prebuilt data
-./run.sh --ingest     # also acquire COD and rebuild the graphs from scratch
+./run.sh --ingest     # first run: acquire COD and build the graphs
+./run.sh              # thereafter: start TuringDB + the UI on the built data
 ```
+
+The CIFs are not in this repository — they are 2.8 GB and belong to COD — so the
+first run has to be `--ingest`. It takes roughly 25 minutes.
 
 Then open <http://localhost:8087> for the browser studio, or query from a shell:
 
