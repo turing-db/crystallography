@@ -45,7 +45,7 @@ class Contact:
     b_index: int
     a_uid: str
     b_uid: str
-    kind: str                 # 'hbond' | 'halogen' | 'pi_stack'
+    kind: str                 # 'hbond' | 'hbond_weak' | 'halogen' | 'pi_stack'
     length: float             # H...A, X...A, or centroid...centroid
     angle: float | None       # D-H...A, C-X...A, or interplanar
     symop: str
@@ -127,6 +127,12 @@ def detect_contacts(
     the criterion exists for, and correctly still covers an unrefined water in a
     structure whose organic component does have hydrogens.
 
+    Three populations come out of this function and they are kept apart by
+    `kind`: 'hbond' (strong, located H), 'hbond' with h_inferred=True (strong,
+    heavy-atom fallback), and 'hbond_weak' (C-H...A, located H only). A query
+    filtering kind='hbond' sees exactly what it saw before weak contacts
+    existed.
+
     pi-stacking is not produced here: it needs ring perception, and the spec's
     centroid criterion alone admits badly offset stacks that most crystal
     engineers would not call pi-stacking. Shipping a half-defined criterion
@@ -141,7 +147,8 @@ def detect_contacts(
     whole ingest on one entry.
     """
     stats: dict[str, int] = {
-        "hbond": 0, "hbond_inferred": 0, "halogen": 0, "intramolecular_skipped": 0,
+        "hbond": 0, "hbond_inferred": 0, "hbond_weak": 0, "halogen": 0,
+        "intramolecular_skipped": 0,
     }
     out: list[Contact] = []
     adj = build_adjacency(sg, bonds)
@@ -231,10 +238,18 @@ def detect_contacts(
     seen: set[tuple[int, int, str, str]] = set()
     search_r = max(ch.HBOND_HEAVY_MAX, ch.MAX_CONTACT_SEARCH_RADIUS)
 
+    # A weak-bond donor is a carbon that actually carries a refined hydrogen.
+    # Gating on `hydrogens` here rather than inside the loop is what keeps the
+    # cost down: in an entry with no H positions at all (much of Acta E) the
+    # carbon set collapses to empty and the weak pass costs nothing.
     donors = [
         a for a in atoms
         if a.occupancy >= ch.MIN_BONDING_OCCUPANCY
-        and (ch.is_hbond_element(a.element) or ch.is_halogen_donor(a.element))
+        and (
+            ch.is_hbond_element(a.element)
+            or ch.is_halogen_donor(a.element)
+            or (ch.is_weak_hbond_donor(a.element) and a.site_index in hydrogens)
+        )
     ]
     if not donors:
         return out, stats
@@ -342,6 +357,42 @@ def detect_contacts(
                         ))
                         stats["hbond"] += 1
                         stats["hbond_inferred"] += 1
+
+            # ---- weak hydrogen bond, C-H...A -----------------------------
+            # Same geometry as the strong class, a looser distance ceiling, and
+            # a separate `kind` so the two never merge in a query. No inferred
+            # variant: without a located H this is not a hydrogen bond, it is
+            # two atoms near each other (see chemistry.WEAK_HBOND_DONORS).
+            if ch.is_weak_hbond_donor(donor.element):
+                for h_site, h_op in hydrogens.get(donor.site_index, ()):
+                    h_atom = by_index.get(h_site)
+                    if h_atom is None:
+                        continue
+                    hf = h_op.apply_to_xyz(
+                        [h_atom.fract_x, h_atom.fract_y, h_atom.fract_z]
+                    )
+                    hp = st.cell.orthogonalize(gemmi.Fractional(*hf))
+                    h_pos = np.array([hp.x, hp.y, hp.z])
+                    d_ha = float(np.linalg.norm(a_pos - h_pos))
+                    if d_ha >= ch.WEAK_HBOND_MAX_H_ACCEPTOR:
+                        continue
+                    angle = _angle_deg(d_pos, h_pos, a_pos)
+                    if angle <= ch.WEAK_HBOND_MIN_ANGLE:
+                        continue
+                    kw = (donor.site_index, acceptor.site_index,
+                          symop.cif_code(), f"w{h_atom.uid}")
+                    if kw in seen:
+                        continue
+                    seen.add(kw)
+                    out.append(Contact(
+                        a_index=donor.site_index, b_index=acceptor.site_index,
+                        a_uid=donor.uid, b_uid=acceptor.uid, kind="hbond_weak",
+                        length=round(d_ha, 4), angle=round(angle, 2),
+                        symop=symop.cif_code(),
+                        symop_triplet=symop.full_triplet(), h_inferred=False,
+                        donor_uid=donor.uid, hydrogen_uid=h_atom.uid,
+                    ))
+                    stats["hbond_weak"] += 1
 
             # ---- halogen bond --------------------------------------------
             if ch.is_halogen_donor(donor.element):

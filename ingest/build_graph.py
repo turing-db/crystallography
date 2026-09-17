@@ -40,7 +40,9 @@ from .cod_journals import JOURNALS_BY_KEY
 from .contacts import detect_contacts
 from .download import cod_cif_relpath
 from .fragments import FRAGMENTS_BY_NAME
-from .perception import perceive_component
+from .netdim import is_involution as _involution_uncached
+from .netdim import net_dimensionality
+from .perception import perceive_component, perception_timeouts
 from .periodic import PeriodicNeighbours, asymmetric_positions
 from .solvents import assign_roles, solvent_name
 from .structure import (
@@ -51,6 +53,37 @@ from .structure import (
     find_components,
     read_structure,
 )
+
+#: Elements allowed to be an INFERRED hydrogen-bond donor, i.e. one where no
+#: hydrogen was refined. Halogens are deliberately absent: see the note at the
+#: contact-emission site.
+INFERRED_DONOR_ELEMENTS = frozenset({"N", "O", "S"})
+
+#: The symop alphabet is tiny (a few hundred distinct triplets over the whole
+#: corpus) while the contact count is in the millions, so both of these are
+#: memoised rather than recomputed per edge.
+_INVOLUTION_CACHE: dict[str, bool] = {}
+_CENTRO_CACHE: dict[int, bool] = {}
+
+
+def _involution(triplet: str) -> bool:
+    got = _INVOLUTION_CACHE.get(triplet)
+    if got is None:
+        got = _involution_uncached(triplet)
+        _INVOLUTION_CACHE[triplet] = got
+    return got
+
+
+def _centrosymmetric(number: int) -> bool:
+    got = _CENTRO_CACHE.get(number)
+    if got is None:
+        import gemmi as _g
+
+        sg = _g.find_spacegroup_by_number(number)
+        got = bool(sg.is_centrosymmetric()) if sg is not None else False
+        _CENTRO_CACHE[number] = got
+    return got
+
 
 MAX_SITES = 400          # skip pathologically large asymmetric units
 #: Wall-clock budget for one structure. COD contains a long tail of entries that
@@ -290,6 +323,48 @@ def build(
             if value is None:
                 missing[field_name] += 1
 
+        # ---- periodic-net dimensionality --------------------------------
+        # Computed at emit rather than in the parse worker: it needs only what
+        # the parse cache already holds, so `--from-cache` can recompute it
+        # without re-parsing the corpus.
+        #
+        # THE COVALENT BONDS MUST BE IN THE GRAPH, not only the contacts. A
+        # hydrogen bond runs donor-heavy-atom -> acceptor-heavy-atom, and those
+        # two sites are joined in the crystal *through the molecules they belong
+        # to* -- an edge that is not a contact. Built from contacts alone the
+        # quotient graph is bipartite between donors and acceptors with no path
+        # longer than one hop: no cycles, rank 0, and almost every structure
+        # reports as a 0D finite motif, including textbook catemers.
+        #
+        # Including the intramolecular bonds contracts each molecule to a point,
+        # which is the standard formulation. It is safe: a ring INSIDE a finite
+        # molecule closes with the zero lattice vector and contributes nothing
+        # to the rank.
+        net_bonds = [(b["a"], b["b"], b["symop"]) for b in res["bonds"]]
+        uid_site = {a["uid"]: i for i, a in enumerate(res["atoms"])}
+        sg_no = res["spacegroup_number"]
+
+        def _dim(kinds: frozenset[str]) -> int:
+            edges = [
+                (c["a"], c["b"], c["symop"])
+                for c in res["contacts"]
+                if c["kind"] in kinds and not c["h_inferred"]
+            ]
+            if not edges:
+                return -1            # no qualifying contact; NOT a 0D claim
+            try:
+                d = net_dimensionality(sg_no, net_bonds + edges, uid_site)[0]
+            except Exception:  # noqa: BLE001
+                return -2            # declined (over the expansion ceiling)
+            return d
+
+        net_dim = _dim(frozenset({"hbond"}))
+        net_dim_weak = _dim(frozenset({"hbond", "hbond_weak"}))
+        # A coordination polymer's COVALENT net already carries lattice
+        # translations, so for those structures the number describes the
+        # framework, not the hydrogen-bond net. Flagged rather than mixed in.
+        net_polymeric = any(c["is_polymeric"] for c in res["components"])
+
         s_props: dict[str, Any] = {
             "cod_id": cod_id,
             "a": a, "b": b, "c": c, "alpha": al, "beta": be, "gamma": ga,
@@ -307,6 +382,15 @@ def build(
             "has_z_prime": zprime is not None,
             "n_components": len(res["components"]),
             "n_contacts": len(res["contacts"]),
+            # -1 means "no qualifying contact", which is NOT the same claim as
+            # 0D. Kept distinct so a query can exclude it rather than count it
+            # as an isolated motif.
+            "net_dim": net_dim,
+            "net_dim_weak": net_dim_weak,
+            "has_net_dim": net_dim >= 0,
+            # true where the covalent net itself is periodic, so net_dim
+            # describes the framework rather than the hydrogen-bond net
+            "net_dim_is_framework": net_polymeric,
             # honest flag: this structure's contact search hit its time budget,
             # so its contact list is incomplete
             "contacts_truncated": bool(res.get("stats", {}).get("timed_out")),
@@ -321,6 +405,10 @@ def build(
             "hm_symbol": res["spacegroup_hm"],
             "number": res["spacegroup_number"],
             "crystal_system": res["crystal_system"],
+            # Asked of gemmi rather than hand-listed: the centrosymmetric
+            # groups have a long tail, so any short hand-picked list
+            # understates the true share by several points.
+            "is_centrosymmetric": _centrosymmetric(res["spacegroup_number"]),
         })
         edge("IN_SPACE_GROUP", sid, gid)
 
@@ -355,23 +443,50 @@ def build(
             })
         report["bonds"] += len(res["bonds"])
 
+        element_of = {a["uid"]: a["element"] for a in res["atoms"]}
         for ct in res["contacts"]:
             x, y = atom_ids.get(ct["a"]), atom_ids.get(ct["b"])
             if x is None or y is None:
                 continue
+            kind = ct["kind"]
+
+            # The h_inferred fallback fires per COMPONENT, so in a structure
+            # that is otherwise fully H-refined every heavy atom of a
+            # hydrogen-free fragment -- a perchlorate, a chloride, a fluorinated
+            # ring -- would qualify as a "donor" at D...A < 3.5 A with no
+            # angular test. Organic fluorine and covalently bound chlorine do
+            # not donate a proton. Only N, O and S are kept as inferred donors;
+            # the rest are still stored, but as close_contact, which no
+            # hydrogen-bond statistic touches.
+            if kind == "hbond" and ct["h_inferred"]:
+                donor_el = element_of.get(ct["donor"] or ct["a"], "")
+                if donor_el not in INFERRED_DONOR_ELEMENTS:
+                    kind = "close_contact"
+
             edge("CONTACT", x, y, {
-                "kind": ct["kind"], "length": ct["length"],
+                "kind": kind, "length": ct["length"],
                 "angle": ct["angle"], "symop": ct["symop"],
                 "symop_triplet": ct["triplet"], "h_inferred": ct["h_inferred"],
                 "has_angle": ct["angle"] is not None,
+                # Is the generating operation its own inverse? This is what
+                # separates a RING motif from a CATEMER: an inversion, mirror or
+                # two-fold relates exactly two molecules, while a 2(1) screw or
+                # a glide has infinite order and generates a chain. Both have a
+                # two-fold rotation part, so nothing short of the exact
+                # composition distinguishes them -- and without it an R2,2(8)
+                # dimer query returns C(4) catemers.
+                "is_involution": _involution(ct["triplet"]),
                 "cod_id": cod_id,
             })
-            report[f"contact_{ct['kind']}"] += 1
-            if ct["h_inferred"]:
+            report[f"contact_{kind}"] += 1
+            if ct["h_inferred"] and kind == "hbond":
                 report["contact_hbond_inferred"] += 1
         report["contacts"] += len(res["contacts"])
 
         # ---- Components + Fragments -------------------------------------
+        # index within this structure -> the (corpus-wide, deduplicated)
+        # Component node id, so the atoms can be joined to their molecule below
+        comp_cid: dict[int, int] = {}
         for comp in res["components"]:
             key = comp["inchikey"] or comp["fallback_key"] or f"poly_{comp['formula']}"
             props = {
@@ -398,6 +513,7 @@ def build(
                     if comp["error"]:
                         perception_errors[comp["error"].split(":")[0]] += 1
             cid = reg.node("Component", key, props)
+            comp_cid[comp["index"]] = cid
             report["components"] += 1
             edge("CONTAINS_COMPONENT", sid, cid, {
                 "role": comp["role"], "n_sites": len(comp["sites"]),
@@ -411,6 +527,27 @@ def build(
                 if not _edge_exists(edges, cid, fid, "HAS_FRAGMENT"):
                     edge("HAS_FRAGMENT", cid, fid)
                 report["fragment_links"] += 1
+
+        # ---- Atom -> Component ------------------------------------------
+        # Without this edge there is no path from a CONTACT between two atoms to
+        # the MOLECULES those atoms belong to, which is precisely what a synthon
+        # question needs: "two carboxylic-acid components joined by a reciprocal
+        # pair of hydrogen bonds" is unanswerable when Atom and Component share
+        # no edge. The parser already knows the assignment -- it is what
+        # find_components returned -- so this is exact, not inferred, and free.
+        #
+        # Note the asymmetry it creates, which is the point: a Component node is
+        # deduplicated corpus-wide by identity, so one Component collects
+        # IN_COMPONENT edges from every structure it appears in. That is the
+        # "same molecule in forty structures is one node with forty edges" claim
+        # made traversable from the atomic level.
+        for at in res["atoms"]:
+            aid = atom_ids.get(at["uid"])
+            cid2 = comp_cid.get(at.get("comp", -1))
+            if aid is None or cid2 is None:
+                continue
+            edge("IN_COMPONENT", aid, cid2)
+            report["in_component"] += 1
 
         # ---- Publication / Journal / Author ------------------------------
         doi = (meta.get("doi") or "").strip()
@@ -468,12 +605,47 @@ def build(
         n_supersedes += 1
     report["supersedes"] = n_supersedes
 
+    # A handful of COD entries carry a coordinate or cell parameter that comes
+    # through as NaN. Python's json.dumps emits a bare `NaN`, which is NOT valid
+    # JSON, and TuringDB's loader rejects the whole 3.5 GB file on the first one
+    # -- `[json.exception.parse_error.101] ... last read: '"fract_x":N'` -- so a
+    # single bad atom costs the entire corpus.
+    #
+    # Dropping the record is not an option: LOAD JSONL requires node ids and
+    # relationship ids to be dense from 0 with no gaps, so removing one
+    # renumbers everything after it. The non-finite value is nulled instead,
+    # which simply leaves that property absent on that entity, and the count is
+    # reported rather than swallowed.
+    n_sanitised = 0
+
+    def _strip_nonfinite(obj: dict) -> dict:
+        props = obj.get("properties")
+        if not isinstance(props, dict):
+            return obj
+        for k, v in list(props.items()):
+            if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+                props[k] = None
+        return obj
+
+    def _dump(obj: dict) -> str:
+        nonlocal n_sanitised
+        try:
+            return json.dumps(obj, separators=(",", ":"), allow_nan=False)
+        except ValueError:
+            n_sanitised += 1
+            return json.dumps(_strip_nonfinite(obj), separators=(",", ":"),
+                              allow_nan=False)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w") as fh:
         for node in reg.nodes:
-            fh.write(json.dumps(node, separators=(",", ":")) + "\n")
+            fh.write(_dump(node) + "\n")
         for e in edges:
-            fh.write(json.dumps(e, separators=(",", ":")) + "\n")
+            fh.write(_dump(e) + "\n")
+    report["nonfinite_sanitised"] = n_sanitised
+    if n_sanitised:
+        print(f"  NON-FINITE      : {n_sanitised:,} entities carried a NaN/inf "
+              f"property; those properties were nulled (JSON has no NaN)")
 
     summary = {
         "nodes": len(reg.nodes),
@@ -646,10 +818,25 @@ def main(argv: Sequence[str] | None = None) -> int:
           f"(skipped {c.get('skipped', 0):,})")
     print(f"  atoms           : {c.get('atoms', 0):,}")
     print(f"  bonds           : {c.get('bonds', 0):,}")
+    print(f"  Atom->Component : {c.get('in_component', 0):,}")
+    # An empty Fragment layer is silent: perception failures do not raise, and
+    # the component and InChIKey counts are unaffected by them. Assert on it
+    # rather than expecting a reader to notice a missing line.
+    if c.get("components", 0) and not c.get("fragment_links", 0):
+        print("  !! FRAGMENT LAYER IS EMPTY -- perception is broken; every "
+              "synthon, coformer and solid-form query will return nothing")
+    _to = perception_timeouts()
+    if _to:
+        print(f"  RDKit timeouts  : {_to:,} components abandoned to a killed "
+              f"worker (see ingest/rdkit_guard.py)")
     print(f"  contacts        : {c.get('contacts', 0):,}  "
           f"(hbond {c.get('contact_hbond', 0):,} of which "
           f"{c.get('contact_hbond_inferred', 0):,} h_inferred, "
-          f"halogen {c.get('contact_halogen', 0):,})")
+          f"weak C-H...A {c.get('contact_hbond_weak', 0):,}, "
+          f"halogen {c.get('contact_halogen', 0):,}, "
+          f"close_contact {c.get('contact_close_contact', 0):,} "
+          f"[inferred with a non-N/O/S donor, excluded from every "
+          f"hydrogen-bond statistic])")
     print(f"  components      : {c.get('components', 0):,}  "
           f"(InChIKey {c.get('components_with_inchikey', 0):,}, "
           f"fallback {c.get('components_fallback', 0):,}, "

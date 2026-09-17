@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# One-command setup for the CCDC crystallography demo.
+# One-command setup.
 #
-#   ./run.sh            start TuringDB + the visualizer (assumes data is built)
+#   ./run.sh            start TuringDB + the browser studio on existing data
 #   ./run.sh --ingest   also acquire COD and build the graphs from scratch
 #
-# The ingest path takes a while and needs network access to
+# The ingest path takes roughly 25 minutes and needs network access to
 # crystallography.net (rsync for CIFs, MySQL for metadata).
+#
+# Once running: http://localhost:8087 for the studio, `crystal facts` for the
+# command line. See TUTORIAL.md.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -38,7 +41,11 @@ if [[ "${1:-}" == "--ingest" ]]; then
   echo "==> acquiring COD (CIFs by rsync, metadata from the public MySQL mirror)"
   uv run python -m ingest.download --dataset slice
   echo "==> building the graph"
-  uv run python -m ingest.build_graph --dataset slice --limit 10000
+  # --out is explicit: build_graph would otherwise emit data/jsonl/slice.jsonl
+  # while load_turingdb below reads cod_slice.jsonl, and the mismatch only
+  # shows up as a missing file at the end of a 20-minute ingest.
+  uv run python -m ingest.build_graph --dataset slice \
+      --out data/jsonl/cod_slice.jsonl
   uv run python -m ingest.project_contacts
   echo "==> loading into TuringDB"
   TURING_HOST="http://localhost:$TURING_PORT" \
@@ -54,5 +61,6 @@ echo "==> frontend"
 cd visualizer
 [ -d node_modules ] || npm install
 npm run build
-echo "==> serving on :$UI_PORT (proxying /api -> :$TURING_PORT)"
+echo "==> studio on http://localhost:$UI_PORT  (proxying /api -> :$TURING_PORT)"
+echo "==> command line: TURING_HOST=http://localhost:$TURING_PORT uv run python crystal.py facts"
 TURING_FRONTEND_PORT="$UI_PORT" TURING_API_PORT="$TURING_PORT" node server.js
