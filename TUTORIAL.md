@@ -56,7 +56,7 @@ c.load_graph("cod_slice_v2")     # ~4 s for the full corpus
 |---|---|
 | `cod_slice_v2` | the full model — this is the one you want |
 | `cod_contacts_v2` | atoms + located-H hydrogen bonds only, for variable-length traversal |
-| `cod_versioned` | the same corpus committed chronologically, 26 commits |
+| `cod_versioned` | the same corpus committed chronologically, one commit per publication year |
 | `cod_versions` | the ledger mapping `cod@<year>` to a commit hash |
 
 ---
@@ -257,6 +257,23 @@ why `--cypher` shows a query with no `count()` in it.
 boolean companion instead: `has_temperature`, `has_r_factor`, `has_net_dim`,
 `has_inchikey`. Absent properties still project safely as nulls, and comparisons
 silently exclude them.
+
+**There are no query parameters.** `$name` is a `PARSE_ERROR: Not implemented:
+Parameters`, so a value can only reach a query by string interpolation — which
+means **the usual protection against injection is not available**:
+
+```cypher
+WHERE g.hm_symbol = 'P -1'          -- 1
+WHERE g.hm_symbol = 'P -1' OR 1=1   -- 214
+```
+
+Every query in this repository interpolates, because there is no alternative.
+That is acceptable here: the corpus is public CC0 data, the server is bound to
+localhost, and the demo has no untrusted input. **It is not acceptable in
+anything that accepts input from a user**, and the patterns in this repository
+should not be lifted into such a service without an escaping or allow-listing
+layer in front of them. Until parameters land, treat a Cypher string as
+something you build, never something a caller supplies.
 
 **`type` is a reserved word.** The edge-type function is `edgeType(r)`, and a
 property named `type` needs backticks. This is why fragments carry
@@ -467,7 +484,8 @@ atoms, and it would overwrite the subgraph the studio paints.
 
 ## 7. Time travel
 
-The corpus is ingested chronologically as 26 commits, one per publication year.
+The corpus is ingested chronologically, one commit per publication year: 26
+years, and 26 entries in the `cod_versions` ledger.
 
 ```bash
 crystal commits                  # year, tag, totals, commit hash

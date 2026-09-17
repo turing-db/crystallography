@@ -161,7 +161,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--host", default="http://localhost:6691")
     ap.add_argument("--graph", default="cod_slice_v2")
-    ap.add_argument("--turing-dir", type=Path, default=Path("turing-data-137"))
+    ap.add_argument("--turing-dir", type=Path, default=Path("turing-data"),
+                    help="graph directory, for the disk and CSD-scale figures")
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--merge", action="store_true",
                     help="also run MERGE_DATAPARTS and re-measure")
@@ -245,6 +246,23 @@ def main(argv: list[str] | None = None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(report, indent=2) + "\n")
     print(f"\nwrote {args.out}")
+
+    # Say which promised outputs are missing, and fail. Silently omitting the
+    # disk figures because --turing-dir pointed nowhere, or the join-order
+    # ratio because one side timed out, leaves a report that looks complete.
+    absent = [k for k in ("join_order_speedup", "bytes_per_structure",
+                          "csd_projection_bytes") if k not in report]
+    errored = [n for n, r in results.items() if "error" in r]
+    if absent or errored:
+        print()
+        if absent:
+            print("MISSING from the report: " + ", ".join(absent))
+            if not report.get("disk_before", {}).get("exists"):
+                print(f"  ({args.turing_dir} does not hold this graph -- "
+                      f"pass --turing-dir)")
+        if errored:
+            print("queries that did not complete: " + ", ".join(errored))
+        return 1
     return 0
 
 
