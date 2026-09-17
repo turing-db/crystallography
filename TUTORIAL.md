@@ -235,88 +235,8 @@ rebuild rows from chunk `k`: read `n = chunk[0].length`, then
 **Failures arrive as HTTP 200 with a non-null top-level `error`.** Checking the
 status code is not enough.
 
----
 
-## 4. The Cypher dialect: what works and what does not
-
-TuringDB implements most of Cypher. The gaps that matter in practice:
-
-**Not supported.** `WITH`, `collect()`, `OPTIONAL MATCH`, `UNION`, `DISTINCT`,
-`MERGE`, variable-length path aliases, `IN`, `CONTAINS` / `STARTS WITH` / `=~`.
-
-**Only two aggregates exist.** `count()` and `avg()` work; `min()`, `max()`,
-`sum()` and `stdev()` are all rejected. So "the shortest contact", "the longest
-cell axis" and "the total number of sites" cannot be expressed as aggregates —
-project the column and reduce it client-side, which is what `crystal` does.
-
-**No GROUP BY, and aggregates do not combine with other return items.**
-`RETURN f.fragment_type, count(c)` is rejected, and so is an aggregate inside
-`ORDER BY`. A "how many of each" question is expressed as a flat projection and
-counted client-side — which is exactly what `crystal run fragments` does, and
-why `--cypher` shows a query with no `count()` in it.
-
-**`IS NULL` does not work.** Every optional numeric field has an explicit
-boolean companion instead: `has_temperature`, `has_r_factor`, `has_net_dim`,
-`has_inchikey`. Absent properties still project safely as nulls, and comparisons
-silently exclude them.
-
-**There are no query parameters.** `$name` is a `PARSE_ERROR: Not implemented:
-Parameters`, so a value can only reach a query by string interpolation — which
-means **the usual protection against injection is not available**:
-
-```cypher
-WHERE g.hm_symbol = 'P -1'          -- 1
-WHERE g.hm_symbol = 'P -1' OR 1=1   -- 214
-```
-
-Every query in this repository interpolates, because there is no alternative.
-That is acceptable here: the corpus is public CC0 data, the server is bound to
-localhost, and the demo has no untrusted input. **It is not acceptable in
-anything that accepts input from a user**, and the patterns in this repository
-should not be lifted into such a service without an escaping or allow-listing
-layer in front of them. Until parameters land, treat a Cypher string as
-something you build, never something a caller supplies.
-
-**`type` is a reserved word.** The edge-type function is `edgeType(r)`, and a
-property named `type` needs backticks. This is why fragments carry
-`fragment_type`.
-
-**Property types are global, not per label.** One property name has one type
-across the whole graph. `Publication.volume` is `journal_volume` here because
-`Structure.cell_volume` already claimed a numeric `volume`.
-
-**Projecting a property that no node carries is an `ANALYZE_ERROR`**, not an
-empty column. Same for an edge type that does not exist at the commit you are
-querying. Use `CALL db.propertyTypes()` and `CALL db.edgeTypes()` to see what
-exists — but note they read a registry that remembers names from earlier builds,
-so they over-report; confirm with a `count()` before relying on one.
-
-**Variable-length traversal cannot be restricted to an edge type.** The
-quantifier is postfix — `-[e]->{1,8}`, `-[e]->+`, `-[e]->*` — and adding a type
-is rejected. That is why `cod_contacts_v2` exists: in a graph whose only edges
-are hydrogen bonds, an untyped quantifier *is* a hydrogen-bond traversal.
-
-```cypher
-MATCH (a:Atom {uid:'2229029_O1'})-[e]->{1,6}(b:Atom) RETURN count(b)
-```
-
-**`IN` does not work, but `UNWIND` does** — and it is the replacement:
-
-```cypher
-UNWIND [1, 2] AS k MATCH (s:Structure) WHERE s.net_dim = k RETURN count(s)
-```
-
-**Useful and easy to miss:** `SKIP`, numeric comparisons in `WHERE`, arithmetic
-in `RETURN` (`RETURN r.length * 2`), `labels(n)`, `count(*)`, multi-key
-`ORDER BY`, `ORDER BY <alias>`, and `cosine_similarity()` /
-`euclidean_distance()` over embedding properties.
-
-**`toInteger()` and `toFloat()` do not work** despite appearing in the Cypher
-surface — both are an `ANALYZE_ERROR` here.
-
----
-
-## 5. Worked questions
+## 4. Worked questions
 
 ### Which space groups dominate?
 
@@ -543,8 +463,7 @@ $ crystal at 2009 "MATCH ()-[r:CONTACT]->() RETURN count(r)"
 error: ANALYZE_ERROR: Unknown edge type: CONTACT
 ```
 
-TuringDB has commit hashes, integer change ids and a single `main` — no tags and
-no branches. The `cod@<year>` names live in the `cod_versions` ledger graph,
+TuringDB has commit hashes, integer change ids and a single `main`. The `cod@<year>` names live in the `cod_versions` ledger graph,
 which makes the mapping itself queryable.
 
 ---
@@ -697,7 +616,7 @@ are a clean `PLAN_ERROR`; only `RETURN dist` and `RETURN dist, path` are safe.
 spaces overlap, so resolve the even positions with `CALL db.getNodes`.
 
 Given that `label` is a String on every `Atom` here, this is easy to hit. Treat
-it as a sharp edge rather than a feature until it is fixed upstream.
+it as a sharp edge rather than a feature. THIS WILL BE FIXED IN OUR NEXT RELEASE.
 
 ---
 
