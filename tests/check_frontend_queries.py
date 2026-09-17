@@ -60,9 +60,8 @@ SUBS = {
     # DIMER_COUNT and base are query PREFIXES concatenated with a suffix at the
     # call site; substituting their text is what makes those queries runnable.
     r"\$\{DIMER_COUNT\}": (
-        "MATCH (f1:Fragment)<-[:HAS_FRAGMENT]-(c1:Component)"
-        "<-[:IN_COMPONENT]-(a1:Atom)-[h:CONTACT]->(a2:Atom)"
-        "-[:IN_COMPONENT]->(c2:Component)-[:HAS_FRAGMENT]->(f2:Fragment) "
+        "MATCH (f1:Fragment)<-[:IN_FRAGMENT]-(a1:Atom)"
+        "-[h:CONTACT]->(a2:Atom)-[:IN_FRAGMENT]->(f2:Fragment) "
         "WHERE f1.fragment_type = 'carboxylic_acid' "
         "AND f2.fragment_type = 'carboxylic_acid' "
         "AND h.kind = 'hbond' AND h.h_inferred = false AND h.is_involution = "),
@@ -96,8 +95,12 @@ _CALL_QUERY = re.compile(
 #: drops one, the panels render empty rather than failing, which is the exact
 #: class of bug this file exists to catch. An empty extraction therefore fails
 #: loudly instead of reporting success over nothing.
-REQUIRED_TOKENS = ("CONTACT", "IN_COMPONENT", "HAS_FRAGMENT", "net_dim",
-                   "is_involution", "Snapshot", "IN_SPACE_GROUP")
+#: Schema elements the STUDIO depends on. IN_COMPONENT is deliberately absent:
+#: the studio's motif queries reach functional groups through IN_FRAGMENT, which
+#: is atom-level and therefore correct, so nothing here traverses atom ->
+#: molecule. That edge is covered by tests/check_cli_queries.py instead.
+REQUIRED_TOKENS = ("CONTACT", "HAS_FRAGMENT", "IN_FRAGMENT",
+                   "net_dim", "is_involution", "Snapshot", "IN_SPACE_GROUP")
 
 
 def extract(paths: list[Path]) -> list[tuple[str, str]]:

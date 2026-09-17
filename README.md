@@ -1,6 +1,6 @@
 # Crystallography on TuringDB
 
-The intermolecular contact network of 84,801 crystal structures, stored as a
+The intermolecular contact network of 84,805 crystal structures, stored as a
 graph and queryable in milliseconds.
 
 COD and the CSD store atoms and coordinates. Hydrogen bonds, halogen bonds and
@@ -46,11 +46,11 @@ network access to `crystallography.net`.
 
 | | |
 |---|---|
-| Structures | 84,801 |
-| Atomic sites | 4,693,914 |
-| Components (molecules & ions) | 74,918 |
-| Covalent bonds | 5,026,626 |
-| **Intermolecular contacts** | **687,310** |
+| Structures | 84,805 |
+| Atomic sites | 4,694,045 |
+| Components (molecules & ions) | 74,939 |
+| Covalent bonds | 5,024,842 |
+| **Intermolecular contacts** | **687,048** |
 | Space groups | 214 |
 
 The contact layer is **three populations, never blended**, because a query has
@@ -58,15 +58,15 @@ to be able to refuse the weaker evidence:
 
 | | count | geometry |
 |---|---|---|
-| Strong H-bond, hydrogen located | 152,592 | mean H···A **2.048 Å** at **160.4°** |
-| Inferred — no H refined, heavy-atom D···A fallback | 114,399 | 42.8% of the H-bond layer |
-| Weak C–H···A, hydrogen located | 392,116 | mean H···A 2.674 Å at 145.0° |
-| Halogen bond | 4,119 | C–X···A > 150°, X···A under ΣvdW |
-| `close_contact` — excluded from every H-bond statistic | 24,084 | implausible inferred donor |
+| Strong H-bond, hydrogen located | 152,433 | mean H···A **2.048 Å** at **160.4°** |
+| Inferred — no H refined, heavy-atom D···A fallback | 114,456 | 42.9% of the H-bond layer |
+| Weak C–H···A, hydrogen located | 391,877 | mean H···A 2.674 Å at 145.0° |
+| Halogen bond | 4,122 | C–X···A > 150°, X···A under ΣvdW |
+| `close_contact` — excluded from every H-bond statistic | 24,160 | implausible inferred donor |
 
 82.1% of structures are in a centrosymmetric space group.
 
-Periodic-net dimensionality is scored for **40,315 structures (47.5%)** — the
+Periodic-net dimensionality is scored for **40,320 structures (47.5%)** — the
 rest have no located-hydrogen strong hydrogen bond and carry `net_dim = -1`. Any
 dimensionality percentage quoted here is over that scored subset, not the whole
 corpus.
@@ -78,7 +78,7 @@ Every figure on this page is re-derived from the live graph by
 
 ## What TuringDB is doing here that a relational store would not
 
-**The contact network is persisted, not derived.** 687,310 edges, each carrying
+**The contact network is persisted, not derived.** 687,048 edges, each carrying
 the symmetry operation that generated the neighbour in CIF form (`2_565`). The
 periodic network is therefore traversable without materialising a supercell,
 and a motif search is a pattern match rather than a geometry job over every
@@ -175,12 +175,6 @@ has three bonds.
 
 ## Known limits
 
-- **There is no atom-level fragment membership.** `HAS_FRAGMENT` links a
-  molecule to a functional-group type; nothing records *which* atom belongs to
-  that group. The shipped motif queries therefore select "an oxygen of a
-  molecule containing a carboxylic acid", which in a polyfunctional molecule can
-  be an alcohol or a nitro oxygen instead. Spot-checking 60 dimer hits, 10 were
-  not carboxyl–carboxyl. Treat those queries as candidate generators.
 - **π-stacking is not implemented.** It needs ring perception, and a
   centroid-distance criterion with no slippage constraint admits badly offset
   pairs that most crystal engineers would not call stacking.

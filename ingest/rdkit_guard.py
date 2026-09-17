@@ -48,6 +48,16 @@ def _worker(conn: Any) -> None:  # pragma: no cover - runs in a child process
     from rdkit.Chem import rdDetermineBonds
 
     RDLogger.DisableLog("rdApp.*")
+
+    _compiled: list = []
+
+    def _patterns() -> list:
+        if not _compiled:
+            from .fragments import compiled_patterns
+
+            _compiled.extend(compiled_patterns())
+        return _compiled
+
     while True:
         try:
             molblock = conn.recv()
@@ -60,6 +70,21 @@ def _worker(conn: Any) -> None:  # pragma: no cover - runs in a child process
                 continue
             rdDetermineBonds.DetermineBondOrders(m, charge=0, embedChiral=False)
             Chem.SanitizeMol(m)
+            # Fragment matching happens HERE, on the perceived molecule, while
+            # the atom order is still the one the caller built. The caller
+            # cannot do it: the only representation that crosses back is a
+            # SMILES string, whose atom order is canonical, not original -- so
+            # matched indices would be unmappable to crystallographic sites.
+            # Matching here is what makes atom-level fragment membership
+            # possible at all.
+            matches: dict[str, list[int]] = {}
+            for pattern, query in _patterns():
+                try:
+                    hits = m.GetSubstructMatches(query, uniquify=True)
+                except Exception:  # noqa: BLE001
+                    continue
+                if hits:
+                    matches[pattern.name] = sorted({i for h in hits for i in h})
             inchi = Chem.MolToInchi(m)
             if not inchi:
                 conn.send(("error", "empty InChI"))
@@ -69,7 +94,8 @@ def _worker(conn: Any) -> None:  # pragma: no cover - runs in a child process
                 {
                     "inchikey": Chem.InchiToInchiKey(inchi),
                     "charge": Chem.GetFormalCharge(m),
-                    "smiles": Chem.MolToSmiles(m),
+                    "fragments": sorted(matches),
+                    "fragment_atoms": matches,
                 },
             ))
         except Exception as exc:  # noqa: BLE001

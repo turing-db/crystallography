@@ -138,15 +138,17 @@ general-position dimers.
 
 ### Two things that are easy to get wrong
 
-**`Fragment` is a 16-node lookup table, not a per-molecule annotation.** There
-is one node per functional-group type for the whole corpus, and `HAS_FRAGMENT`
-says *this molecule contains at least one of these somewhere*. There is **no
-atom-level fragment membership**: nothing records which oxygen belongs to the
-carboxyl group. A query reading `f.fragment_type = 'carboxylic_acid' AND
-a1.element = 'O'` therefore means "some oxygen of a molecule that has a COOH
-somewhere", which is not the same thing and will admit alcohols, nitro oxygens
-and esters in polyfunctional molecules. Treat the shipped motif queries as
-*candidate generators* and confirm the hits.
+**`Fragment` is a 16-node lookup table, and it is reached two ways.**
+`HAS_FRAGMENT` runs Component → Fragment and means *this molecule contains at
+least one of these somewhere*. `IN_FRAGMENT` runs Atom → Fragment and means
+*this specific atom is part of one*.
+
+Use the right one. A motif query must use `IN_FRAGMENT`: written through
+`HAS_FRAGMENT`, `f.fragment_type = 'carboxylic_acid' AND a1.element = 'O'`
+means "some oxygen of a molecule that has a COOH somewhere", which in a
+polyfunctional molecule also matches its alcohols, esters and nitro oxygens.
+A question genuinely about molecules — "what co-crystallises with an acid" —
+should use `HAS_FRAGMENT`.
 
 **`Component` is deduplicated across structures.** One node per distinct
 molecular identity for the whole corpus, so `c.formula` is that shared node's
@@ -345,14 +347,14 @@ you want the setting as the depositor reported it:
 
 ```cypher
 MATCH (s:Structure)-[:IN_SPACE_GROUP]->(g:SpaceGroup)
-WHERE g.number = 14 RETURN count(s)                    -- 29,640, all settings
+WHERE g.number = 14 RETURN count(s)                    -- 29,644, all settings
 
 MATCH (s:Structure) WHERE s.hm_symbol = 'P 1 21/c 1'
 RETURN count(s)                                        -- 18,643, that setting
 ```
 
 For the same reason, `crystal run spacegroups` tallies by group and labels each
-bucket with one representative symbol: the 29,640 printed against `P 1 21/n 1`
+bucket with one representative symbol: the 29,644 printed against `P 1 21/n 1`
 is all of No. 14, not that setting alone. `cod_versioned` keys `SpaceGroup` by
 symbol instead, so there the settings are separate nodes.
 
@@ -404,8 +406,14 @@ crystal run synthon-hetero    # O-H...N acid to pyridine
 Both counts are stored *edges*. To compare physical hydrogen bonds, count
 involution-generated homosynthon edges twice — a centrosymmetric acid dimer is
 two bonds held as one edge, and the heterosynthon has no such pairing. On this
-corpus the correction moves the split from 47.9 / 52.1 to 63.4 / 36.6 and
-reverses the winner.
+corpus that moves the split from **62.2 / 37.8** to **75.0 / 25.0**: the
+homodimer wins either way, and the correction widens the margin rather than
+changing the answer.
+
+Note both figures are over a corpus where only 110 molecules carry *both*
+groups, so this is the corpus-wide propensity of each synthon, not a
+head-to-head contest within molecules that had a genuine choice. Scope it to
+those 110 if that is the question you mean.
 
 ### Is a packing a dimer, a chain, a sheet or a framework?
 
@@ -414,8 +422,8 @@ admitted as well): `0` finite motif, `1` chain, `2` sheet, `3` framework.
 
 `-1` means **not scored** — the structure has no located-hydrogen strong
 hydrogen bond, or the orbit expansion exceeded its ceiling. That is **44,486 of
-84,801 structures, 52.5% of the corpus**, so any dimensionality percentage is
-over the 40,315 that were scored, not over the whole corpus. Filter on
+84,805 structures, 52.5% of the corpus**, so any dimensionality percentage is
+over the 40,320 that were scored, not over the whole corpus. Filter on
 `has_net_dim = true` to be explicit about it. (`-2` is reserved for a
 computation that raised; it is currently empty.)
 
@@ -490,7 +498,7 @@ years, and 26 entries in the `cod_versions` ledger.
 ```bash
 crystal commits                  # year, tag, totals, commit hash
 crystal at 2009 "MATCH (s:Structure) RETURN count(s)"      # 32,419
-crystal at 2026 "MATCH (s:Structure) RETURN count(s)"      # 84,801
+crystal at 2026 "MATCH (s:Structure) RETURN count(s)"      # 84,805
 ```
 
 In the studio, five investigations carry a strip of 26 ticks below the answer;
@@ -608,7 +616,7 @@ the API reports only `Failed to load JSONL graph`, with the line and column in
 
 | | `LOAD JSONL` | Cypher `CHANGE NEW … COMMIT … CHANGE SUBMIT` |
 |---|---|---|
-| Same 84,801 structures | **55 s** | **77 min** |
+| Same 84,805 structures | **55 s** | **77 min** |
 | History | none — one immutable graph | 26 queryable commits |
 | Cost profile | linear | quadratic in corpus size |
 

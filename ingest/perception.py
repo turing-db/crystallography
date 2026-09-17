@@ -18,7 +18,7 @@ in a DIFFERENT property so it is never mistaken for an InChIKey.
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import gemmi
 
@@ -78,6 +78,9 @@ class Perceived:
     n_heavy: int
     charge: int | None
     fragments: list[str]
+    #: fragment type -> the SITE INDICES it matched, so a query can ask which
+    #: atom belongs to the group rather than only which molecule contains one
+    fragment_sites: dict[str, list[int]] = field(default_factory=dict)
     error: str = ""
 
 
@@ -180,10 +183,16 @@ def perceive_component(
         # from an absent group. The perceived structure comes back as SMILES:
         # atom order is irrelevant to a SMARTS census, connectivity and bond
         # order are not.
-        perceived = Chem.MolFromSmiles(payload["smiles"])
-        frags = _match_fragments(perceived) if perceived is not None \
-            else _safe_fragments(mol)
-        return Perceived(key, fallback, formula, n_atoms, n_heavy, charge, frags)
+        # The child matched the SMARTS on the perceived molecule, so these
+        # indices are in the caller's own atom order and map straight back to
+        # crystallographic sites through `instances`.
+        frags = payload.get("fragments") or []
+        frag_sites = {
+            name: sorted({instances[i][0] for i in idxs if i < len(instances)})
+            for name, idxs in (payload.get("fragment_atoms") or {}).items()
+        }
+        return Perceived(key, fallback, formula, n_atoms, n_heavy, charge, frags,
+                         fragment_sites=frag_sites)
     except Exception as exc:  # noqa: BLE001
         # Still try fragment matching on the unsanitised connectivity: many
         # SMARTS here are purely topological and match without bond orders.

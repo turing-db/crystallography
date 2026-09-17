@@ -178,6 +178,7 @@ def process_structure(args: tuple[str, int]) -> dict[str, Any] | None:
                 "n_atoms": p.n_atoms, "n_heavy": p.n_heavy,
                 "inchikey": p.inchikey, "fallback_key": p.fallback_key,
                 "charge": p.charge, "fragments": p.fragments,
+                "fragment_sites": p.fragment_sites,
                 "is_polymeric": False, "error": p.error,
             })
 
@@ -532,6 +533,20 @@ def build(
                     edge("HAS_FRAGMENT", cid, fid)
                     report["fragment_links"] += 1
 
+                # Atom -> Fragment. HAS_FRAGMENT says a MOLECULE contains a
+                # group somewhere; this says WHICH ATOMS are in it. Without it
+                # a motif query can only ask "an oxygen of a molecule that has
+                # a carboxylic acid", which in a polyfunctional molecule also
+                # matches its alcohols, esters and nitro oxygens.
+                for site in comp.get("fragment_sites", {}).get(frag, ()):
+                    at_uid = res["atoms"][site]["uid"] if site < len(res["atoms"]) else None
+                    aid2 = atom_ids.get(at_uid) if at_uid else None
+                    if aid2 is None:
+                        continue
+                    if not _edge_exists(edges, aid2, fid, "IN_FRAGMENT"):
+                        edge("IN_FRAGMENT", aid2, fid)
+                        report["in_fragment"] += 1
+
         # ---- Atom -> Component ------------------------------------------
         # Without this edge there is no path from a CONTACT between two atoms to
         # the MOLECULES those atoms belong to, which is precisely what a synthon
@@ -837,6 +852,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  atoms           : {c.get('atoms', 0):,}")
     print(f"  bonds           : {c.get('bonds', 0):,}")
     print(f"  Atom->Component : {c.get('in_component', 0):,}")
+    print(f"  Atom->Fragment  : {c.get('in_fragment', 0):,}")
     # An empty Fragment layer is silent: perception failures do not raise, and
     # the component and InChIKey counts are unaffected by them. Assert on it
     # rather than expecting a reader to notice a missing line.
